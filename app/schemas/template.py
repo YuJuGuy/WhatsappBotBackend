@@ -3,45 +3,49 @@ from typing import Optional, List
 
 
 # ──────────────────────────────────────────────
-# Phone schemas
+# Template schemas
 # ──────────────────────────────────────────────
 
-class PhoneBase(BaseModel):
+class TemplateCreate(BaseModel):
     name: str
-    description: Optional[str] = None
+    body: str
 
 
-class PhoneInfo(PhoneBase):
+class TemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    body: Optional[str] = None
+
+
+class TemplateRead(BaseModel):
     id: int
-    status: Optional[str] = None
-    session_id: str
-    number: Optional[str] = None
+    name: str
+    body: str
 
     class Config:
         from_attributes = True
 
 
 # ──────────────────────────────────────────────
-# Phone Group schemas
+# Template Group schemas
 # ──────────────────────────────────────────────
 
-class PhoneGroupCreate(BaseModel):
+class TemplateGroupCreate(BaseModel):
     name: str
     description: Optional[str] = None
-    phone_ids: Optional[List[int]] = None
+    template_ids: Optional[List[int]] = None
 
 
-class PhoneGroupUpdate(BaseModel):
+class TemplateGroupUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    phone_ids: Optional[List[int]] = None
+    template_ids: Optional[List[int]] = None
 
 
-class PhoneGroupRead(BaseModel):
+class TemplateGroupRead(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
-    phones: List[PhoneInfo] = []
+    templates: List[TemplateRead] = []
 
     class Config:
         from_attributes = True

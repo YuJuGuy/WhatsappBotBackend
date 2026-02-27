@@ -2,8 +2,11 @@ from sqlmodel import SQLModel, Field, Relationship
 from typing import Optional, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from app.models.phone import Phone
-    from app.models.group import Group
+    from app.models.phone import Phone, Group
+    from app.models.settings import Settings
+    from app.models.template import Template, TemplateGroup
+    from app.models.campaign import Campaign
+    from app.models.call import AutoCallReply
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -16,3 +19,8 @@ class User(SQLModel, table=True):
     # Relationships
     phones: List["Phone"] = Relationship(back_populates="user")
     groups: List["Group"] = Relationship(back_populates="user")
+    settings: Optional["Settings"] = Relationship(back_populates="user")
+    templates: List["Template"] = Relationship(back_populates="user")
+    template_groups: List["TemplateGroup"] = Relationship(back_populates="user")
+    campaigns: List["Campaign"] = Relationship(back_populates="user")
+    auto_call_reply: Optional["AutoCallReply"] = Relationship(back_populates="user")

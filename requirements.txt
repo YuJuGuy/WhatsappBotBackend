@@ -2,4 +2,6 @@ argon2-cffi
 "fastapi[standard]" 
 sqlmodel 
 "passlib[bcrypt]" 
-"python-jose[cryptography]"    
+"python-jose[cryptography]"
+psycopg2-binary
+openpyxl

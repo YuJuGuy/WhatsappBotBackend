@@ -1,14 +1,16 @@
+import os
 from sqlmodel import SQLModel, create_engine, Session
 from app.models.user import User
-from app.models.phone import Phone
-from app.models.group import Group
-from app.models.phone_group_link import PhoneGroupLink
+from app.models.phone import Phone, Group, PhoneGroupLink
+from app.models.settings import Settings
+from app.models.template import Template, TemplateGroup, TemplateGroupLink
+from app.models.campaign import Campaign, CampaignRecipient
+from app.models.call import AutoCallReply
 
-sqlite_file_name = "database.db"
-sqlite_url = f"sqlite:///{sqlite_file_name}"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:22101975@localhost:5432/postgres")
 
-connect_args = {"check_same_thread": False}
-engine = create_engine(sqlite_url, echo=False, connect_args=connect_args)
+engine = create_engine(DATABASE_URL, echo=False)
+
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
