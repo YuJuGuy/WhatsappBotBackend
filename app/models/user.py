@@ -6,7 +6,8 @@ if TYPE_CHECKING:
     from app.models.settings import Settings
     from app.models.template import Template, TemplateGroup
     from app.models.campaign import Campaign
-    from app.models.call import AutoCallReply
+    from app.models.call import CallAutoReplyConfig
+    from app.models.autoreply import MessageAutoReplyRule
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -23,4 +24,5 @@ class User(SQLModel, table=True):
     templates: List["Template"] = Relationship(back_populates="user")
     template_groups: List["TemplateGroup"] = Relationship(back_populates="user")
     campaigns: List["Campaign"] = Relationship(back_populates="user")
-    auto_call_reply: Optional["AutoCallReply"] = Relationship(back_populates="user")
+    auto_call_reply: Optional["CallAutoReplyConfig"] = Relationship(back_populates="user")
+    autoreplies: List["MessageAutoReplyRule"] = Relationship(back_populates="user")

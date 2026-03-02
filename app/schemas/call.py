@@ -2,21 +2,21 @@ from pydantic import BaseModel, Field as PydanticField
 from typing import Optional
 
 
-# ── Auto Call Reply Config ──
+# ── Call Auto Reply Config ──
 
-class AutoCallReplyCreate(BaseModel):
+class CallAutoReplyCreate(BaseModel):
     enabled: bool = False
     process_groups: bool = False
     default_template_id: int
     priority: int = 50
 
-class AutoCallReplyUpdate(BaseModel):
+class CallAutoReplyUpdate(BaseModel):
     enabled: Optional[bool] = None
     process_groups: Optional[bool] = None
     default_template_id: Optional[int] = None
     priority: Optional[int] = None
 
-class AutoCallReplyRead(BaseModel):
+class CallAutoReplyRead(BaseModel):
     id: int
     enabled: bool
     process_groups: bool

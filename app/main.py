@@ -8,6 +8,9 @@ from app.api.settings import routes as settings_routes
 from app.api.templates import routes as template_routes
 from app.api.campaigns import routes as campaign_routes
 from app.api.calls import routes as call_routes
+from app.api.webhooks import routes as webhook_routes
+from app.api.autoreply import routes as autoreply_routes
+from app.api.messages import routes as messages_routes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,7 +40,10 @@ app.include_router(phone_routes.router, prefix="/api/phone", tags=["phone"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
 app.include_router(template_routes.router, prefix="/api/templates", tags=["templates"])
 app.include_router(campaign_routes.router, prefix="/api/campaigns", tags=["campaigns"])
-app.include_router(call_routes.router, prefix="/api/calls", tags=["calls"])
+app.include_router(call_routes.router, prefix="/api/calls-config", tags=["calls-config"])
+app.include_router(webhook_routes.router, prefix="/api/webhook", tags=["webhook"])
+app.include_router(autoreply_routes.router, prefix="/api/autoreply", tags=["autoreply"])
+app.include_router(messages_routes.router, prefix="/api/messages", tags=["messages"])
 
 @app.get("/")
 def read_root():

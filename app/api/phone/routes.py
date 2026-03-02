@@ -193,7 +193,11 @@ async def check_phone_status(
     # If session doesn't exist or is stopped, create it
     if waha_status == "STOPPED":
         try:
-            create_result = await create_session(phone.session_id, webhook_url=f"{WEBHOOK_BASE_URL}/api/calls/webhook" if WEBHOOK_BASE_URL else "")
+            create_result = await create_session(
+                phone.session_id, 
+                webhook_url=f"{WEBHOOK_BASE_URL}/api/webhook" if WEBHOOK_BASE_URL else "",
+                user_id=phone.user_id
+            )
             waha_status = create_result.get("status", "STARTING")
             info = create_result
         except Exception:

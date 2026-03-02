@@ -22,16 +22,23 @@ _headers = {"X-Api-Key": API_KEY}
 WAHA_HMAC_SECRET = os.getenv("WAHA_HMAC_SECRET", "")
 
 
-async def create_session(name: str, webhook_url: str = "") -> dict:
+async def create_session(name: str, webhook_url: str = "", user_id: Optional[int] = None) -> dict:
     """Create a new WAHA session with webhook config and start it."""
     body: dict = {"name": name, "start": True}
     if webhook_url:
         webhook_cfg: dict = {
             "url": webhook_url,
-            "events": ["session.status", "call.received"],
+            "events": ["session.status", "call.received", "message.any"],
         }
         if WAHA_HMAC_SECRET:
             webhook_cfg["hmac"] = {"key": WAHA_HMAC_SECRET}
+        if user_id is not None:
+            webhook_cfg["customHeaders"] = [
+                {
+                    "name": "X-User-ID",
+                    "value": str(user_id)
+                }
+            ]
         body["config"] = {"webhooks": [webhook_cfg]}
 
     async with httpx.AsyncClient() as client:

@@ -6,7 +6,7 @@ if TYPE_CHECKING:
     from app.models.template import Template
 
 
-class AutoCallReply(SQLModel, table=True):
+class CallAutoReplyConfig(SQLModel, table=True):
     """User-level config for auto-replying to declined calls."""
     id: Optional[int] = Field(default=None, primary_key=True)
     enabled: bool = Field(default=False)
@@ -20,5 +20,5 @@ class AutoCallReply(SQLModel, table=True):
     # Relationships
     user: Optional["User"] = Relationship(back_populates="auto_call_reply")
     default_template: Optional["Template"] = Relationship(
-        sa_relationship_kwargs={"foreign_keys": "[AutoCallReply.default_template_id]"}
+        sa_relationship_kwargs={"foreign_keys": "[CallAutoReplyConfig.default_template_id]"}
     )
