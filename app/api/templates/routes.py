@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 from app.schemas.template import TemplateCreate, TemplateUpdate, TemplateRead
 from app.schemas.template import TemplateGroupCreate, TemplateGroupUpdate, TemplateGroupRead
@@ -184,7 +185,9 @@ def get_template_groups(
 ):
     """List all template groups for the current user, with nested templates."""
     groups = session.exec(
-        select(TemplateGroup).where(TemplateGroup.user_id == current_user.id)
+        select(TemplateGroup)
+        .where(TemplateGroup.user_id == current_user.id)
+        .options(selectinload(TemplateGroup.template_links).selectinload(TemplateGroupLink.template))
     ).all()
     return [_build_group_response(g) for g in groups]
 
@@ -196,7 +199,11 @@ def get_template_group(
     current_user: User = Depends(get_current_user)
 ):
     """Get a single template group by ID with nested templates."""
-    group = session.get(TemplateGroup, group_id)
+    group = session.exec(
+        select(TemplateGroup)
+        .where(TemplateGroup.id == group_id)
+        .options(selectinload(TemplateGroup.template_links).selectinload(TemplateGroupLink.template))
+    ).first()
     if not group:
         raise HTTPException(status_code=404, detail="Template group not found")
     if group.user_id != current_user.id:

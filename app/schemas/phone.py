@@ -45,3 +45,27 @@ class PhoneGroupRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+# ──────────────────────────────────────────────
+# Webhook Schemas
+# ──────────────────────────────────────────────
+
+class MeInfo(BaseModel):
+    id: str
+    pushName: Optional[str] = None
+
+class SessionStatusPayload(BaseModel):
+    status: str
+    statuses: Optional[list] = []
+
+class SessionStatusWebhookEvent(BaseModel):
+    event: str
+    session: str
+    me: Optional[MeInfo] = None
+    payload: SessionStatusPayload
+    engine: Optional[str] = None
+    environment: Optional[dict] = None
+    user_id: Optional[int] = None
+
+    class Config:
+        extra = "allow"

@@ -3,7 +3,7 @@ from sqlmodel import Session, select
 from datetime import datetime, timezone
 
 from app.api.deps import get_session, get_current_user
-from app.utils.db_utils import insert_outbox
+from app.api.outbox.routes import insert_outbox
 from app.models.user import User
 from app.models.phone import Phone
 from app.models.messages import Messages

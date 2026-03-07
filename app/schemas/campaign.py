@@ -37,8 +37,6 @@ class CampaignRead(BaseModel):
     template_group_id: Optional[int] = None
     use_group: bool
     sender_phone_ids: List[int] = []
-    phone_column: str
-    variable_mapping: Dict[str, str] = {}
     scheduled_at: datetime
     created_at: datetime
     recipient_count: int = 0
@@ -55,6 +53,12 @@ class CampaignRecipientRead(BaseModel):
     id: int
     phone_number: str
     row_data: Dict = {}
+    rendered_message: str = ""
+    status: str = "pending"
+    error_message: Optional[str] = None
+    sent_by_session_name: Optional[str] = None
+    sent_by_number: Optional[str] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from datetime import datetime, timezone
 
@@ -14,14 +14,16 @@ router = APIRouter()
 @router.get("/")
 def get_messages(
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    limit: int = Query(200, description="Max messages to return to prevent DB crashing")
 ):
     """Get all messages for the current user."""
     stmt = (
         select(Messages, Phone.name)
         .outerjoin(Phone, Messages.session_id == Phone.session_id)
         .where(Messages.user_id == current_user.id)
-        .order_by(Messages.timestamp.desc()) 
+        .order_by(Messages.timestamp.desc())
+        .limit(limit)
     )
     results = session.exec(stmt).all()
     

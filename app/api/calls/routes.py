@@ -11,7 +11,7 @@ from app.schemas.call import (
     CallAutoReplyCreate, CallAutoReplyUpdate, CallAutoReplyRead,
     CallWebhookEvent
 )
-from app.utils.db_utils import insert_outbox
+from app.api.outbox.routes import insert_outbox
 from app.utils.waha import reject_call
 from app.utils.hmac_verify import verify_webhook_hmac
 

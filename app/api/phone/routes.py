@@ -3,8 +3,9 @@ from typing import List
 import random
 import string
 import httpx
+from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
-from app.schemas.phone import PhoneBase, PhoneInfo
+from app.schemas.phone import PhoneBase, PhoneInfo, SessionStatusWebhookEvent
 from app.schemas.phone import PhoneGroupCreate, PhoneGroupUpdate, PhoneGroupRead
 from app.api.deps import get_session, get_current_user
 from app.models.phone import Phone, Group, PhoneGroupLink
@@ -41,7 +42,7 @@ def create_phone(
         session_id=generate_session_id(),
         user_id=current_user.id,
         number="",
-        status="pending"
+        status="STOPPED"
     )
     session.add(phone_obj)
     session.commit()
@@ -148,12 +149,8 @@ async def restart_phone_session(
     except Exception:
         raise HTTPException(status_code=500, detail="فشل إعادة تشغيل الجلسة")
 
-    if waha_status == "SCAN_QR_CODE":
-        phone.status = "scan_qr"
-    elif waha_status == "WORKING":
-        phone.status = "connected"
-    else:
-        phone.status = "starting"
+    # Map WAHA status directly
+    phone.status = waha_status
 
     session.add(phone)
     session.commit()
@@ -167,7 +164,7 @@ async def restart_phone_session(
 
 
 # ──────────────────────────────────────────────
-# Session Status & QR Code
+# Session Status & QR Code 
 # ──────────────────────────────────────────────
 
 @router.get("/{phone_id}/status")
@@ -204,21 +201,14 @@ async def check_phone_status(
             waha_status = "STARTING"
 
     # Map WAHA status to our DB status
+    # Map WAHA status directly
+    phone.status = waha_status
     if waha_status == "WORKING":
-        phone.status = "connected"
         # Try to get the phone number from the session info
         me = info.get("me", {})
         if me and me.get("id"):
             # id format is "1234567890@c.us"
             phone.number = me["id"].split("@")[0]
-    elif waha_status == "SCAN_QR_CODE":
-        phone.status = "scan_qr"
-    elif waha_status == "STARTING":
-        phone.status = "starting"
-    elif waha_status == "FAILED":
-        phone.status = "failed"
-    else:
-        phone.status = "pending"
 
     session.add(phone)
     session.commit()
@@ -254,6 +244,7 @@ async def get_phone_qr(
 @router.post("/{phone_id}/request-code")
 async def phone_request_code(
     phone_id: int,
+    body: dict = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
@@ -263,10 +254,13 @@ async def phone_request_code(
         raise HTTPException(status_code=404, detail="Phone not found")
     if phone.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    if not phone.number:
-        raise HTTPException(status_code=400, detail="Phone number is not set")
 
-    result = await request_code(phone.session_id, phone.number)
+    # Use phone_number from body if provided, otherwise fallback to phone.number
+    phone_number = (body or {}).get("phone_number") or phone.number
+    if not phone_number:
+        raise HTTPException(status_code=400, detail="Phone number is required")
+
+    result = await request_code(phone.session_id, phone_number)
     return result
 
 
@@ -354,7 +348,9 @@ def get_phone_groups(
 ):
     """List all phone groups for the current user, with nested phones."""
     groups = session.exec(
-        select(Group).where(Group.user_id == current_user.id)
+        select(Group)
+        .where(Group.user_id == current_user.id)
+        .options(selectinload(Group.phone_links).selectinload(PhoneGroupLink.phone))
     ).all()
     return [_build_group_response(g) for g in groups]
 
@@ -366,7 +362,11 @@ def get_phone_group(
     current_user: User = Depends(get_current_user)
 ):
     """Get a single phone group by ID with nested phones."""
-    group = session.get(Group, group_id)
+    group = session.exec(
+        select(Group)
+        .where(Group.id == group_id)
+        .options(selectinload(Group.phone_links).selectinload(PhoneGroupLink.phone))
+    ).first()
     if not group:
         raise HTTPException(status_code=404, detail="Phone group not found")
     if group.user_id != current_user.id:
@@ -427,3 +427,66 @@ def delete_phone_group(
     session.delete(group)
     session.commit()
     return None
+
+
+# ──────────────────────────────────────────────
+# Webhook
+# ──────────────────────────────────────────────
+
+async def session_status_webhook(event: SessionStatusWebhookEvent):
+    """Handle session.status webhook from WAHA with security checks."""
+    session_id = event.session
+    waha_status = event.payload.status
+    user_id = event.user_id
+    if not session_id or not waha_status:
+        return
+
+    db_generator = get_session()
+    db = next(db_generator)
+    try:
+        phone = db.exec(select(Phone).where(Phone.session_id == session_id)).first()
+        if not phone:
+            print(f"[Webhook] Phone not found for session_status: {session_id}")
+            return
+
+        # Security Check 1: Verify the webhook came from the correct user session
+        if user_id is not None and phone.user_id != user_id:
+            print(f"[Webhook] User ID mismatch for session {session_id}. Expected {phone.user_id}, got {user_id}")
+            return
+
+        # Security Check 2: If connected, verify the phone number isn't hijacked
+        if waha_status == "WORKING":
+            try:
+                # Get the connected number directly from the webhook payload!
+                if event.me and event.me.id:
+                    connected_number = event.me.id.split("@")[0]
+                    
+                    # Check if this number is already registered to a DIFFERENT user
+                    existing_phone = db.exec(
+                        select(Phone).where(Phone.number == connected_number, Phone.user_id != phone.user_id)
+                    ).first()
+                    
+                    if existing_phone:
+                        print(f"[Webhook] Security: Number {connected_number} is already registered to another user!")
+                        from app.utils.waha import delete_session
+                        await delete_session(session_id)
+                        phone.status = "failed"
+                        phone.description = "فشل الربط: الرقم مستخدم من قبل حساب آخر"
+                        db.add(phone)
+                        db.commit()
+                        return
+
+                    # Update the number if it's new
+                    if phone.number != connected_number:
+                        phone.number = connected_number
+            except Exception as e:
+                print(f"[Webhook] Failed to get session info for {session_id}: {e}")
+
+        # Map WAHA status directly
+        phone.status = waha_status
+
+        db.add(phone)
+        db.commit()
+        print(f"[Webhook] Updated phone {phone.id} status to {phone.status} (waha: {waha_status})")
+    finally:
+        db.close()

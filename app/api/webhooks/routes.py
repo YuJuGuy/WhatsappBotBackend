@@ -5,6 +5,8 @@ from app.schemas.call import CallWebhookEvent
 from app.api.calls.routes import call_webhook
 from app.schemas.messages import MessageWebhookEvent
 from app.api.autoreply.routes import message_webhook, save_message
+from app.api.phone.routes import session_status_webhook
+from app.schemas.phone import SessionStatusWebhookEvent
 
 router = APIRouter()
 
@@ -29,7 +31,6 @@ async def global_webhook_receive(request: Request):
 
     elif event_type == "message.any":
         # Parse into the message-specific schema
-        print(body)
         
         # Fast exit for groups/channels/statuses before any DB or deeper logic parsing
         raw_from = body.get("payload", {}).get("from", "")
@@ -52,6 +53,15 @@ async def global_webhook_receive(request: Request):
         
         # 2. Process auto-reply logic
         await message_webhook(event)
+
+    elif event_type == "session.status":
+        try:
+            parsed_user_id = int(user_id) if user_id else None
+        except ValueError:
+            parsed_user_id = None
+            
+        event = SessionStatusWebhookEvent(**body, user_id=parsed_user_id)
+        await session_status_webhook(event)
 
     else:
         print(f"[Webhook] Unhandled event type: {event_type}")

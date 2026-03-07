@@ -12,6 +12,7 @@ from app.models.template import Template, TemplateGroup, TemplateGroupLink
 from app.models.phone import Phone, Group, PhoneGroupLink
 from app.models.user import User
 from datetime import timezone
+from app.models.outbox import OutboxMessage
 
 router = APIRouter()
 
@@ -40,6 +41,8 @@ def _resolve_phone_ids(
             phone = session.get(Phone, pid)
             if not phone or phone.user_id != user_id:
                 raise HTTPException(status_code=400, detail=f"Phone {pid} not found or not owned by you")
+            if phone.status != "WORKING":
+                raise HTTPException(status_code=400, detail=f"Phone '{phone.name or phone.number or pid}' is not connected. Please scan QR or start the session first.")
             resolved.add(pid)
 
     # Resolve phone group IDs to individual phone IDs
@@ -52,6 +55,9 @@ def _resolve_phone_ids(
                 select(PhoneGroupLink).where(PhoneGroupLink.group_id == gid)
             ).all()
             for link in links:
+                phone = session.get(Phone, link.phone_id)
+                if phone and phone.status != "WORKING":
+                    raise HTTPException(status_code=400, detail=f"Phone '{phone.name or phone.number or link.phone_id}' in group '{group.name}' is not connected. Please fix it first.")
                 resolved.add(link.phone_id)
 
     if not resolved:
@@ -422,6 +428,125 @@ def get_campaign_recipients(
             "id": r.id,
             "phone_number": r.phone_number,
             "row_data": json.loads(r.row_data),
+            "rendered_message": r.rendered_message,
+            "status": r.status,
+            "error_message": r.error_message,
+            "sent_by_session_name": r.sent_by_session_name,
+            "sent_by_number": r.sent_by_number,
+            "updated_at": r.updated_at,
         }
         for r in recipients
     ]
+
+@router.get("/{campaign_id}/report")
+def get_campaign_report(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Get full campaign report: campaign details, summary stats, and recipient list."""
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    recipients = session.exec(
+        select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
+    ).all()
+
+    # summary
+    total = len(recipients)
+    sent = sum(1 for r in recipients if r.status == "sent")
+    failed = sum(1 for r in recipients if r.status == "failed")
+    pending = sum(1 for r in recipients if r.status == "pending")
+    cancelled = sum(1 for r in recipients if r.status == "cancelled")
+
+    mapped_recipients = [
+        {
+            "id": r.id,
+            "phone_number": r.phone_number,
+            "rendered_message": r.rendered_message,
+            "status": r.status,
+            "error_message": r.error_message,
+            "sent_by_session_name": r.sent_by_session_name,
+            "sent_by_number": r.sent_by_number,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        }
+        for r in recipients
+    ]
+
+    return {
+        "campaign": {
+            "id": campaign.id,
+            "name": campaign.name,
+            "description": campaign.description,
+            "status": campaign.status,
+            "scheduled_at": str(campaign.scheduled_at),
+            "created_at": str(campaign.created_at),
+            "recipient_count": total
+        },
+        "summary": {
+            "total": total,
+            "sent": sent,
+            "failed": failed,
+            "pending": pending,
+            "cancelled": cancelled
+        },
+        "recipients": mapped_recipients
+    }
+
+@router.post("/{campaign_id}/cancel", response_model=CampaignRead)
+def cancel_campaign(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Cancel a pending/running campaign."""
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if campaign.status in ["completed", "cancelled"]:
+        raise HTTPException(status_code=400, detail="Cannot cancel an already completed or cancelled campaign")
+
+    from datetime import datetime
+    now_utc = datetime.utcnow()
+
+    # Update the campaign status
+    campaign.status = "cancelled"
+    session.add(campaign)
+
+    # Cancel remaining outbox messages
+    pending_outbox = session.exec(
+        select(OutboxMessage)
+        .where(OutboxMessage.campaign_id == campaign.id)
+        .where(OutboxMessage.status.in_(["pending", "queued"]))
+    ).all()
+    
+    for msg in pending_outbox:
+        msg.status = "cancelled"
+        session.add(msg)
+
+    # Cancel remaining recipients and set updated_at
+    pending_recipients = session.exec(
+        select(CampaignRecipient)
+        .where(CampaignRecipient.campaign_id == campaign.id)
+        .where(CampaignRecipient.status == "pending")
+    ).all()
+    
+    for recipient in pending_recipients:
+        recipient.status = "cancelled"
+        recipient.updated_at = now_utc
+        session.add(recipient)
+
+    session.commit()
+    session.refresh(campaign)
+
+    count = len(session.exec(
+        select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
+    ).all())
+    
+    return _build_campaign_response(campaign, count)
+
