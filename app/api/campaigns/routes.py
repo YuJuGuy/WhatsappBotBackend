@@ -3,16 +3,17 @@ from typing import List, Optional
 import json
 import re
 from io import BytesIO
-from sqlmodel import Session, select
-from openpyxl import load_workbook
+from sqlmodel import Session, select, update
 from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignRead, CampaignRecipientRead
+from app.models.outbox import OutboxMessage
 from app.api.deps import get_session, get_current_user
 from app.models.campaign import Campaign, CampaignRecipient
 from app.models.template import Template, TemplateGroup, TemplateGroupLink
 from app.models.phone import Phone, Group, PhoneGroupLink
 from app.models.user import User
-from datetime import timezone
-from app.models.outbox import OutboxMessage
+from datetime import datetime, timezone
+from openpyxl import load_workbook
+
 
 router = APIRouter()
 
@@ -42,7 +43,7 @@ def _resolve_phone_ids(
             if not phone or phone.user_id != user_id:
                 raise HTTPException(status_code=400, detail=f"Phone {pid} not found or not owned by you")
             if phone.status != "WORKING":
-                raise HTTPException(status_code=400, detail=f"Phone '{phone.name or phone.number or pid}' is not connected. Please scan QR or start the session first.")
+                raise HTTPException(status_code=400, detail=f"Phone '{phone.name or pid}' is not in a working state (status: {phone.status})")
             resolved.add(pid)
 
     # Resolve phone group IDs to individual phone IDs
@@ -56,8 +57,10 @@ def _resolve_phone_ids(
             ).all()
             for link in links:
                 phone = session.get(Phone, link.phone_id)
-                if phone and phone.status != "WORKING":
-                    raise HTTPException(status_code=400, detail=f"Phone '{phone.name or phone.number or link.phone_id}' in group '{group.name}' is not connected. Please fix it first.")
+                if not phone or phone.status != "WORKING":
+                    phone_name = phone.name if phone else link.phone_id
+                    status = phone.status if phone else "UNKNOWN"
+                    raise HTTPException(status_code=400, detail=f"Phone '{phone_name}' in group '{group.name}' is not in a working state (status: {status})")
                 resolved.add(link.phone_id)
 
     if not resolved:
@@ -142,8 +145,6 @@ def _build_campaign_response(campaign: Campaign, recipient_count: int) -> dict:
         "template_group_id": campaign.template_group_id,
         "use_group": campaign.use_group,
         "sender_phone_ids": json.loads(campaign.sender_phone_ids),
-        "phone_column": campaign.phone_column,
-        "variable_mapping": json.loads(campaign.variable_mapping),
         "scheduled_at": campaign.scheduled_at,
         "created_at": campaign.created_at,
         "recipient_count": recipient_count,
@@ -214,6 +215,7 @@ async def create_campaign(
     # Resolve sender phone IDs
     resolved_phones = _resolve_phone_ids(session, data.phone_ids, data.phone_group_ids, current_user.id)
 
+
     # Create campaign
     campaign = Campaign(
         name=data.name,
@@ -254,44 +256,58 @@ async def create_campaign(
         
     # Delay calculation removed as per user request
 
-    from app.utils.db_utils import bulk_insert_outbox
+    from app.api.outbox.routes import bulk_insert_outbox
 
     for i, row in enumerate(data_rows):
         phone_number = row.get(data.phone_column, "").strip()
         if not phone_number:
             continue
-            
-        recipient = CampaignRecipient(
-            phone_number=phone_number,
-            row_data=json.dumps(row),
-            campaign_id=campaign.id,
-        )
-        recipients.append(recipient)
-        session.add(recipient)
-        
+
         # Render message
-        # Determine which template body to use
-        # For simple round robin of templates in a group:
         template_body = bodies[i % len(bodies)]
-        
         rendered_msg = template_body
         for var, col in data.variable_mapping.items():
             val = row.get(col, "")
             rendered_msg = rendered_msg.replace(f"{{{{{var}}}}}", str(val))
-            
+
+        recipient = CampaignRecipient(
+            phone_number=phone_number,
+            row_data=json.dumps(row),
+            campaign_id=campaign.id,
+            rendered_message=rendered_msg,
+        )
+        recipients.append(recipient)
+        session.add(recipient)
+        
         # Assign sender session_id (round-robin)
-        session_id = sender_session_ids[i % len(sender_session_ids)]
+        assigned_idx = i % len(sender_session_ids)
+        session_id = sender_session_ids[assigned_idx]
+        
+        # Rest of the chosen numbers become backups for this specific message in case it fails
+        fallback_ids = [sid for idx, sid in enumerate(sender_session_ids) if idx != assigned_idx]
         
         outbox_messages.append({
             "session_id": session_id,
+            "fallback_session_ids": fallback_ids,
             "payload": {
                 "to": phone_number,
                 "text": rendered_msg,
             },
             "scheduled_at": scheduled_at_aware,
             "user_id": current_user.id,
-            "priority": 100
+            "priority": 100,
+            "campaign_id": campaign.id,
+            "recipient_index": len(recipients) - 1,  # track which recipient this belongs to
         })
+
+    # Flush to get recipient IDs
+    session.flush()
+
+    # Now inject campaign_recipient_id into each outbox message payload
+    for msg in outbox_messages:
+        idx = msg.pop("recipient_index")
+        recipient = recipients[idx]
+        msg["payload"]["campaign_recipient_id"] = recipient.id
 
     session.commit()
     
@@ -300,7 +316,7 @@ async def create_campaign(
         bulk_insert_outbox(outbox_messages)
         
     # Update campaign status to pending
-    campaign.status = "pending"
+    campaign.status = "scheduled"
     session.add(campaign)
     session.commit()
     session.refresh(campaign)
@@ -318,11 +334,31 @@ def get_campaigns(
         select(Campaign).where(Campaign.user_id == current_user.id)
     ).all()
     result = []
+    dirty = False
     for c in campaigns:
+        # Get total count
         count = len(session.exec(
             select(CampaignRecipient).where(CampaignRecipient.campaign_id == c.id)
         ).all())
+        
+        # Determine if finished
+        if c.status == "scheduled":
+            pending_count = len(session.exec(
+                select(CampaignRecipient).where(
+                    CampaignRecipient.campaign_id == c.id,
+                    CampaignRecipient.status == "pending"
+                )
+            ).all())
+            if count > 0 and pending_count == 0:
+                c.status = "finished"
+                session.add(c)
+                dirty = True
+                
         result.append(_build_campaign_response(c, count))
+        
+    if dirty:
+        session.commit()
+        
     return result
 
 
@@ -341,6 +377,20 @@ def get_campaign(
     count = len(session.exec(
         select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
     ).all())
+    
+    # Determine if finished
+    if campaign.status == "scheduled":
+        pending_count = len(session.exec(
+            select(CampaignRecipient).where(
+                CampaignRecipient.campaign_id == campaign.id,
+                CampaignRecipient.status == "pending"
+            )
+        ).all())
+        if count > 0 and pending_count == 0:
+            campaign.status = "finished"
+            session.add(campaign)
+            session.commit()
+            
     return _build_campaign_response(campaign, count)
 
 
@@ -365,7 +415,10 @@ def update_campaign(
     if campaign_in.status is not None:
         campaign.status = campaign_in.status
     if campaign_in.scheduled_at is not None:
-        campaign.scheduled_at = campaign_in.scheduled_at
+        if campaign_in.scheduled_at.tzinfo is None:
+            campaign.scheduled_at = campaign_in.scheduled_at.replace(tzinfo=timezone.utc)
+        else:
+            campaign.scheduled_at = campaign_in.scheduled_at
 
     session.add(campaign)
     session.commit()
@@ -390,6 +443,12 @@ def delete_campaign(
     if campaign.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    if campaign.status == "scheduled":
+        raise HTTPException(
+            status_code=400, 
+            detail="Cannot delete an active campaign. Please cancel it first."
+        )
+
     # Delete recipients first
     recipients = session.exec(
         select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
@@ -397,9 +456,51 @@ def delete_campaign(
     for r in recipients:
         session.delete(r)
 
+
     session.delete(campaign)
     session.commit()
     return None
+
+
+@router.post("/{campaign_id}/cancel", response_model=bool)
+def cancel_campaign(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Cancel an active campaign, stopping all further queued messages."""
+    campaign = session.get(Campaign, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if campaign.status in ["finished", "cancelled"]:
+        raise HTTPException(status_code=400, detail="Campaign is already finished or cancelled")
+
+    # Update DB status
+    campaign.status = "cancelled"
+    session.add(campaign)
+    
+    # Cancel in outbox directly (both pending and already queued)
+    session.exec(
+        update(OutboxMessage)
+        .where(OutboxMessage.campaign_id == campaign.id)
+        .where(OutboxMessage.status.in_(["pending", "queued"]))
+        .values(status="cancelled")
+    )
+
+    # Cancel in CampaignRecipient (for UI reporting sync)
+    session.exec(
+        update(CampaignRecipient)
+        .where(CampaignRecipient.campaign_id == campaign.id)
+        .where(CampaignRecipient.status == "pending")
+        .values(status="cancelled", error_message="Campaign cancelled")
+    )
+    
+    session.commit()
+
+    return True
 
 
 # ──────────────────────────────────────────────
@@ -438,13 +539,14 @@ def get_campaign_recipients(
         for r in recipients
     ]
 
+
 @router.get("/{campaign_id}/report")
 def get_campaign_report(
     campaign_id: int,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """Get full campaign report: campaign details, summary stats, and recipient list."""
+    """Get a summary report for a campaign."""
     campaign = session.get(Campaign, campaign_id)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -455,98 +557,37 @@ def get_campaign_report(
         select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
     ).all()
 
-    # summary
     total = len(recipients)
     sent = sum(1 for r in recipients if r.status == "sent")
     failed = sum(1 for r in recipients if r.status == "failed")
     pending = sum(1 for r in recipients if r.status == "pending")
     cancelled = sum(1 for r in recipients if r.status == "cancelled")
 
-    mapped_recipients = [
-        {
-            "id": r.id,
-            "phone_number": r.phone_number,
-            "rendered_message": r.rendered_message,
-            "status": r.status,
-            "error_message": r.error_message,
-            "sent_by_session_name": r.sent_by_session_name,
-            "sent_by_number": r.sent_by_number,
-            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-        }
-        for r in recipients
-    ]
+    if campaign.status == "scheduled" and total > 0 and pending == 0:
+        campaign.status = "finished"
+        session.add(campaign)
+        session.commit()
 
     return {
-        "campaign": {
-            "id": campaign.id,
-            "name": campaign.name,
-            "description": campaign.description,
-            "status": campaign.status,
-            "scheduled_at": str(campaign.scheduled_at),
-            "created_at": str(campaign.created_at),
-            "recipient_count": total
-        },
+        "campaign": _build_campaign_response(campaign, total),
         "summary": {
             "total": total,
             "sent": sent,
             "failed": failed,
             "pending": pending,
-            "cancelled": cancelled
+            "cancelled": cancelled,
         },
-        "recipients": mapped_recipients
+        "recipients": [
+            {
+                "id": r.id,
+                "phone_number": r.phone_number,
+                "rendered_message": r.rendered_message,
+                "status": r.status,
+                "error_message": r.error_message,
+                "sent_by_session_name": r.sent_by_session_name,
+                "sent_by_number": r.sent_by_number,
+                "updated_at": r.updated_at,
+            }
+            for r in recipients
+        ],
     }
-
-@router.post("/{campaign_id}/cancel", response_model=CampaignRead)
-def cancel_campaign(
-    campaign_id: int,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
-):
-    """Cancel a pending/running campaign."""
-    campaign = session.get(Campaign, campaign_id)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    if campaign.status in ["completed", "cancelled"]:
-        raise HTTPException(status_code=400, detail="Cannot cancel an already completed or cancelled campaign")
-
-    from datetime import datetime
-    now_utc = datetime.utcnow()
-
-    # Update the campaign status
-    campaign.status = "cancelled"
-    session.add(campaign)
-
-    # Cancel remaining outbox messages
-    pending_outbox = session.exec(
-        select(OutboxMessage)
-        .where(OutboxMessage.campaign_id == campaign.id)
-        .where(OutboxMessage.status.in_(["pending", "queued"]))
-    ).all()
-    
-    for msg in pending_outbox:
-        msg.status = "cancelled"
-        session.add(msg)
-
-    # Cancel remaining recipients and set updated_at
-    pending_recipients = session.exec(
-        select(CampaignRecipient)
-        .where(CampaignRecipient.campaign_id == campaign.id)
-        .where(CampaignRecipient.status == "pending")
-    ).all()
-    
-    for recipient in pending_recipients:
-        recipient.status = "cancelled"
-        recipient.updated_at = now_utc
-        session.add(recipient)
-
-    session.commit()
-    session.refresh(campaign)
-
-    count = len(session.exec(
-        select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
-    ).all())
-    
-    return _build_campaign_response(campaign, count)
-

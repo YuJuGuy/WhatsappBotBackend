@@ -8,6 +8,7 @@ from app.models.campaign import Campaign, CampaignRecipient
 from app.models.call import CallAutoReplyConfig
 from app.models.autoreply import MessageAutoReplyRule
 from app.models.outbox import OutboxMessage
+from app.models.blacklist import Blacklist
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:22101975@localhost:5432/postgres")
 

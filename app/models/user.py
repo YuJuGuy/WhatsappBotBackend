@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from app.models.call import CallAutoReplyConfig
     from app.models.autoreply import MessageAutoReplyRule
     from app.models.outbox import OutboxMessage
+    from app.models.blacklist import Blacklist
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -28,3 +29,4 @@ class User(SQLModel, table=True):
     auto_call_reply: Optional["CallAutoReplyConfig"] = Relationship(back_populates="user")
     autoreplies: List["MessageAutoReplyRule"] = Relationship(back_populates="user")
     outbox_messages: List["OutboxMessage"] = Relationship(back_populates="user")
+    blacklist: List["Blacklist"] = Relationship(back_populates="user")
