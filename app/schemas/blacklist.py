@@ -9,6 +9,10 @@ class BlacklistBase(SQLModel):
     phone_number: str
 
 
+import phonenumbers
+from sqlmodel import SQLModel
+from pydantic import field_validator
+
 
 class BlacklistCreate(SQLModel):
     phone_number: str
@@ -17,6 +21,10 @@ class BlacklistCreate(SQLModel):
     @classmethod
     def validate_phone(cls, v: str) -> str:
         try:
+            # ensure it has +
+            if not v.startswith("+"):
+                v = "+" + v
+
             parsed = phonenumbers.parse(v, None)
 
             if not phonenumbers.is_valid_number(parsed):
@@ -27,7 +35,6 @@ class BlacklistCreate(SQLModel):
 
         except phonenumbers.NumberParseException:
             raise ValueError("Invalid phone number")
-
 class BlacklistRead(BlacklistBase):
     id: int
     created_at: datetime
