@@ -6,6 +6,7 @@ from datetime import datetime
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.campaign import Campaign
+    from app.models.train import TrainSession
 
 class OutboxMessage(SQLModel, table=True):
     __tablename__ = "outbox_messages"
@@ -31,7 +32,9 @@ class OutboxMessage(SQLModel, table=True):
     priority: int = Field(default=100, index=True)
     
     campaign_id: Optional[int] = Field(default=None, foreign_key="campaign.id", index=True)
+    train_id: Optional[int] = Field(default=None, foreign_key="train_session.id", index=True)
 
     # Relationships
     user: Optional["User"] = Relationship(back_populates="outbox_messages")
     campaign: Optional["Campaign"] = Relationship(back_populates="outbox_messages")
+    train_session: Optional["TrainSession"] = Relationship(back_populates="outbox_messages")

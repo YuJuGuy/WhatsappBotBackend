@@ -62,3 +62,14 @@ class CampaignRecipientRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ──────────────────────────────────────────────
+# Campaign Resend schemas
+# ──────────────────────────────────────────────
+
+class CampaignResendRequest(BaseModel):
+    recipient_ids: List[int]
+    phone_ids: Optional[List[int]] = None
+    phone_group_ids: Optional[List[int]] = None
+    scheduled_at: datetime

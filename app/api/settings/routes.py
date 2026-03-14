@@ -21,7 +21,7 @@ def get_settings(
     return settings
 
 
-@router.put("/" , response_model=SettingsRead)
+@router.put("/")
 def update_settings(
     settings_in: SettingsUpdate,
     session: Session = Depends(get_session),
@@ -40,5 +40,4 @@ def update_settings(
     settings.max_sleep_seconds = settings_in.max_sleep_seconds
     session.add(settings)
     session.commit()
-    session.refresh(settings)
-    return settings
+    return {"success": True}

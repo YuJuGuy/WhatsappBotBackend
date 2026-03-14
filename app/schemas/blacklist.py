@@ -31,10 +31,19 @@ class BlacklistCreate(SQLModel):
                 raise ValueError("Invalid phone number")
 
             # normalize to digits only
-            return str(parsed.country_code) + str(parsed.national_number)
+            normalized = f"{parsed.country_code}{parsed.national_number}"
+            return normalized.lstrip("+")
 
         except phonenumbers.NumberParseException:
             raise ValueError("Invalid phone number")
 class BlacklistRead(BlacklistBase):
     id: int
     created_at: datetime
+
+
+class BulkBlacklistRequest(SQLModel):
+    phone_numbers: list[str] = []
+    recipient_ids: list[int] = []
+
+class BulkBlacklistDeleteRequest(SQLModel):
+    blacklist_ids: list[int]

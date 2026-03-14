@@ -29,7 +29,7 @@ def generate_session_id():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
 
-@router.post("/", response_model=PhoneInfo)
+@router.post("/")
 def create_phone(
     phone_in: PhoneBase,
     session: Session = Depends(get_session),
@@ -46,11 +46,10 @@ def create_phone(
     )
     session.add(phone_obj)
     session.commit()
-    session.refresh(phone_obj)
-    return JSONResponse(status_code=201, content="Phone created successfully")
+    return {"success": True}
 
 
-@router.put("/{phone_id}", response_model=PhoneInfo)
+@router.put("/{phone_id}")
 def update_phone(
     phone_id: int,
     phone_in: PhoneBase,
@@ -67,8 +66,7 @@ def update_phone(
     phone.description = phone_in.description
     session.add(phone)
     session.commit()
-    session.refresh(phone)
-    return phone
+    return {"success": True}
 
 @router.get("/", response_model=List[PhoneInfo])
 def get_all_phones(
@@ -126,7 +124,7 @@ async def delete_phone(
 
     session.delete(phone)
     session.commit()
-    return {"detail": "Phone deleted"}
+    return {"success": True}
 
 
 @router.post("/{phone_id}/restart")
@@ -317,7 +315,7 @@ def _sync_phone_links(
         session.add(link)
 
 
-@router.post("/groups/", response_model=PhoneGroupRead, status_code=status.HTTP_201_CREATED)
+@router.post("/groups/", status_code=status.HTTP_201_CREATED)
 def create_phone_group(
     group_in: PhoneGroupCreate,
     session: Session = Depends(get_session),
@@ -336,9 +334,8 @@ def create_phone_group(
     if group_in.phone_ids:
         _sync_phone_links(session, group, group_in.phone_ids, current_user.id)
         session.commit()
-        session.refresh(group)
 
-    return _build_group_response(group)
+    return {"success": True}
 
 
 @router.get("/groups/", response_model=List[PhoneGroupRead])
@@ -374,7 +371,7 @@ def get_phone_group(
     return _build_group_response(group)
 
 
-@router.put("/groups/{group_id}", response_model=PhoneGroupRead)
+@router.put("/groups/{group_id}")
 def update_phone_group(
     group_id: int,
     group_in: PhoneGroupUpdate,
@@ -400,8 +397,7 @@ def update_phone_group(
         _sync_phone_links(session, group, group_in.phone_ids, current_user.id)
         session.commit()
 
-    session.refresh(group)
-    return _build_group_response(group)
+    return {"success": True}
 
 
 @router.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)

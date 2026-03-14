@@ -1,18 +1,53 @@
-import psycopg2
-import os
-from dotenv import load_dotenv
+"""
+Lightweight migration script -- run once to add new tables/columns.
+Usage:  python db_migrate.py
+"""
+import os, psycopg2
 
-load_dotenv()
-PG_DSN = os.environ.get("PG_DSN")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql://postgres:22101975@localhost:5432/postgres"
+)
 
-try:
-    with psycopg2.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            # 1. Drop cancelled_at from outbox_messages
-            cur.execute("ALTER TABLE outbox_messages DROP COLUMN IF EXISTS cancelled_at;")
-            # 2. Add updated_at to campaignrecipient
-            cur.execute("ALTER TABLE campaignrecipient ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP;")
-            conn.commit()
-            print("Migration successful.")
-except Exception as e:
-    print(f"Error: {e}")
+MIGRATIONS = [
+    "ALTER TABLE train_session ADD COLUMN IF NOT EXISTS error_message VARCHAR;",
+
+    """CREATE TABLE IF NOT EXISTS autoreplyphonelink (
+        rule_id INTEGER NOT NULL REFERENCES messageautoreplyrule(id) ON DELETE CASCADE,
+        phone_id INTEGER NOT NULL REFERENCES phone(id) ON DELETE CASCADE,
+        PRIMARY KEY (rule_id, phone_id)
+    );""",
+
+    """CREATE TABLE IF NOT EXISTS callconfigphonelink (
+        config_id INTEGER NOT NULL REFERENCES callautoreplyconfig(id) ON DELETE CASCADE,
+        phone_id INTEGER NOT NULL REFERENCES phone(id) ON DELETE CASCADE,
+        PRIMARY KEY (config_id, phone_id)
+    );""",
+
+    "ALTER TABLE callautoreplyconfig DROP CONSTRAINT IF EXISTS callautoreplyconfig_user_id_key;",
+
+    # Each phone can only belong to one call reject rule
+    """DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'callconfigphonelink_phone_id_unique'
+        ) THEN
+            ALTER TABLE callconfigphonelink ADD CONSTRAINT callconfigphonelink_phone_id_unique UNIQUE (phone_id);
+        END IF;
+    END $$;""",
+]
+
+
+def main():
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    cur = conn.cursor()
+    for sql in MIGRATIONS:
+        print(f"Running: {sql[:80]}...")
+        cur.execute(sql)
+    cur.close()
+    conn.close()
+    print("Migrations complete.")
+
+
+if __name__ == "__main__":
+    main()

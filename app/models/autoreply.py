@@ -10,6 +10,12 @@ class enumMatchType(str, enum.Enum):
     starts_with = "starts_with"
     ends_with = "ends_with"
 
+
+class AutoReplyPhoneLink(SQLModel, table=True):
+    rule_id: int = Field(foreign_key="messageautoreplyrule.id", primary_key=True, ondelete="CASCADE")
+    phone_id: int = Field(foreign_key="phone.id", primary_key=True, ondelete="CASCADE")
+
+
 class MessageAutoReplyRule(SQLModel, table=True):
     """Rules for auto-replying to incoming messages."""
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -24,8 +30,6 @@ class MessageAutoReplyRule(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-
     user_id: int = Field(foreign_key="user.id")
 
-    # relationship
     user: Optional["User"] = Relationship(back_populates="autoreplies")

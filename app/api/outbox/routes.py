@@ -59,6 +59,7 @@ def bulk_insert_outbox(messages: List[Dict[str, Any]], batch_size: int = 1000, s
                     user_id=msg["user_id"],
                     priority=msg.get("priority", 100),
                     campaign_id=msg.get("campaign_id"),
+                    train_id=msg.get("train_id"),
                     fallback_session_ids=msg.get("fallback_session_ids", [])
                 )
             )

@@ -15,7 +15,7 @@ router = APIRouter()
 # Template CRUD
 # ──────────────────────────────────────────────
 
-@router.post("/", response_model=TemplateRead, status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 def create_template(
     template_in: TemplateCreate,
     session: Session = Depends(get_session),
@@ -29,8 +29,7 @@ def create_template(
     )
     session.add(template)
     session.commit()
-    session.refresh(template)
-    return template
+    return {"success": True}
 
 
 @router.get("/", response_model=List[TemplateRead])
@@ -60,7 +59,7 @@ def get_template(
     return template
 
 
-@router.put("/{template_id}", response_model=TemplateRead)
+@router.put("/{template_id}")
 def update_template(
     template_id: int,
     template_in: TemplateUpdate,
@@ -81,8 +80,7 @@ def update_template(
 
     session.add(template)
     session.commit()
-    session.refresh(template)
-    return template
+    return {"success": True}
 
 
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -154,7 +152,7 @@ def _sync_template_links(
         session.add(link)
 
 
-@router.post("/groups/", response_model=TemplateGroupRead, status_code=status.HTTP_201_CREATED)
+@router.post("/groups/", status_code=status.HTTP_201_CREATED)
 def create_template_group(
     group_in: TemplateGroupCreate,
     session: Session = Depends(get_session),
@@ -173,9 +171,8 @@ def create_template_group(
     if group_in.template_ids:
         _sync_template_links(session, group, group_in.template_ids, current_user.id)
         session.commit()
-        session.refresh(group)
 
-    return _build_group_response(group)
+    return {"success": True}
 
 
 @router.get("/groups/", response_model=List[TemplateGroupRead])
@@ -211,7 +208,7 @@ def get_template_group(
     return _build_group_response(group)
 
 
-@router.put("/groups/{group_id}", response_model=TemplateGroupRead)
+@router.put("/groups/{group_id}")
 def update_template_group(
     group_id: int,
     group_in: TemplateGroupUpdate,
@@ -237,8 +234,7 @@ def update_template_group(
         _sync_template_links(session, group, group_in.template_ids, current_user.id)
         session.commit()
 
-    session.refresh(group)
-    return _build_group_response(group)
+    return {"success": True}
 
 
 @router.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)

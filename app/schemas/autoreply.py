@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field as PydanticField
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 from app.models.autoreply import enumMatchType
@@ -14,6 +14,7 @@ class MessageAutoReplyCreate(BaseModel):
     is_active: bool = True
     priority: int = 50
     rule_priority: int = 0
+    phone_ids: List[int]
 
 class MessageAutoReplyUpdate(BaseModel):
     trigger_text: Optional[str] = None
@@ -22,6 +23,7 @@ class MessageAutoReplyUpdate(BaseModel):
     is_active: Optional[bool] = None
     priority: Optional[int] = None
     rule_priority: Optional[int] = None
+    phone_ids: Optional[List[int]] = None
 
 class MessageAutoReplyRead(BaseModel):
     id: int
@@ -33,6 +35,7 @@ class MessageAutoReplyRead(BaseModel):
     rule_priority: int
     created_at: datetime
     user_id: int
+    phone_ids: List[int] = []
 
     class Config:
         from_attributes = True

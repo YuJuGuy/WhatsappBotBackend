@@ -49,6 +49,7 @@ async def global_webhook_receive(request: Request):
         event = MessageWebhookEvent(**body, user_id=parsed_user_id)
         
         # 1. Save the incoming message to DB
+        print(f"[Webhook] Saving message: {event}")
         save_message(event)
         
         # 2. Process auto-reply logic

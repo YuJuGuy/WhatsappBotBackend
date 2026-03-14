@@ -2,15 +2,17 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from typing import List, Optional
 import json
 import re
+import phonenumbers
 from io import BytesIO
 from sqlmodel import Session, select, update
-from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignRead, CampaignRecipientRead
+from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignRead, CampaignRecipientRead, CampaignResendRequest
 from app.models.outbox import OutboxMessage
 from app.api.deps import get_session, get_current_user
 from app.models.campaign import Campaign, CampaignRecipient
 from app.models.template import Template, TemplateGroup, TemplateGroupLink
 from app.models.phone import Phone, Group, PhoneGroupLink
 from app.models.user import User
+from app.models.blacklist import Blacklist
 from datetime import datetime, timezone
 from openpyxl import load_workbook
 
@@ -134,6 +136,28 @@ def _parse_xlsx(file_bytes: bytes, sheet_name: Optional[str] = None) -> tuple[Li
     return headers, data_rows
 
 
+
+def _validate_phone_for_campaign(raw: str) -> tuple[str | None, str | None]:
+    raw = (raw or '').strip()
+    if not raw:
+        return None, None
+
+    normalized_input = re.sub(r"[^\d+]", "", raw)
+    if not normalized_input:
+        return None, 'Invalid phone format'
+    if not normalized_input.startswith('+'):
+        normalized_input = f"+{normalized_input}"
+
+    try:
+        parsed = phonenumbers.parse(normalized_input, None)
+    except phonenumbers.NumberParseException:
+        return None, 'Invalid phone format'
+    if not phonenumbers.is_valid_number(parsed):
+        return None, 'Invalid phone number'
+    normalized = f"{parsed.country_code}{parsed.national_number}"
+    normalized = normalized.lstrip("+")
+    return normalized, None
+
 def _build_campaign_response(campaign: Campaign, recipient_count: int) -> dict:
     """Build a campaign response dict."""
     return {
@@ -155,7 +179,7 @@ def _build_campaign_response(campaign: Campaign, recipient_count: int) -> dict:
 # Campaign CRUD
 # ──────────────────────────────────────────────
 
-@router.post("/", response_model=CampaignRead, status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_campaign(
     file: UploadFile = File(...),
     campaign_data: str = Form(...),
@@ -215,6 +239,32 @@ async def create_campaign(
     # Resolve sender phone IDs
     resolved_phones = _resolve_phone_ids(session, data.phone_ids, data.phone_group_ids, current_user.id)
 
+    invalid_numbers = []
+    normalized_rows = []
+    for row in data_rows:
+        raw_phone = str(row.get(data.phone_column, '')).strip()
+        normalized_phone, reason = _validate_phone_for_campaign(raw_phone)
+        if reason:
+            invalid_numbers.append({"value": raw_phone, "reason": reason})
+            continue
+        if not normalized_phone:
+            continue
+        normalized_rows.append((row, normalized_phone))
+    blacklisted_numbers = set(
+        session.exec(select(Blacklist.phone_number).where(Blacklist.user_id == current_user.id)).all()
+    )
+
+    deliverable_rows = [
+        (row, phone_number)
+        for row, phone_number in normalized_rows
+        if phone_number not in blacklisted_numbers
+    ]
+
+    if not deliverable_rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid recipients found after filtering invalid and blacklisted numbers",
+        )
 
     # Create campaign
     campaign = Campaign(
@@ -258,10 +308,8 @@ async def create_campaign(
 
     from app.api.outbox.routes import bulk_insert_outbox
 
-    for i, row in enumerate(data_rows):
-        phone_number = row.get(data.phone_column, "").strip()
-        if not phone_number:
-            continue
+    for i, item in enumerate(deliverable_rows):
+        row, phone_number = item
 
         # Render message
         template_body = bodies[i % len(bodies)]
@@ -321,7 +369,7 @@ async def create_campaign(
     session.commit()
     session.refresh(campaign)
 
-    return _build_campaign_response(campaign, len(recipients))
+    return {"success": True}
 
 
 @router.get("/", response_model=List[CampaignRead])
@@ -362,39 +410,62 @@ def get_campaigns(
     return result
 
 
-@router.get("/{campaign_id}", response_model=CampaignRead)
+@router.get("/{campaign_id}")
 def get_campaign(
     campaign_id: int,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """Get a single campaign by ID."""
+    """Get a single campaign with full report (summary + recipients)."""
     campaign = session.get(Campaign, campaign_id)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    count = len(session.exec(
+
+    recipients = session.exec(
         select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
-    ).all())
-    
-    # Determine if finished
-    if campaign.status == "scheduled":
-        pending_count = len(session.exec(
-            select(CampaignRecipient).where(
-                CampaignRecipient.campaign_id == campaign.id,
-                CampaignRecipient.status == "pending"
-            )
-        ).all())
-        if count > 0 and pending_count == 0:
-            campaign.status = "finished"
-            session.add(campaign)
-            session.commit()
-            
-    return _build_campaign_response(campaign, count)
+    ).all()
+
+    total = len(recipients)
+    sent = sum(1 for r in recipients if r.status == "sent")
+    failed = sum(1 for r in recipients if r.status == "failed")
+    pending = sum(1 for r in recipients if r.status == "pending")
+    cancelled = sum(1 for r in recipients if r.status == "cancelled")
+    skipped = sum(1 for r in recipients if r.status == "skipped")
+
+    if campaign.status == "scheduled" and total > 0 and pending == 0:
+        campaign.status = "finished"
+        session.add(campaign)
+        session.commit()
+
+    return {
+        "campaign": _build_campaign_response(campaign, total),
+        "summary": {
+            "total": total,
+            "sent": sent,
+            "failed": failed,
+            "pending": pending,
+            "cancelled": cancelled,
+            "skipped": skipped,
+        },
+        "recipients": [
+            {
+                "id": r.id,
+                "phone_number": r.phone_number,
+                "rendered_message": r.rendered_message,
+                "status": r.status,
+                "error_message": r.error_message,
+                "sent_by_session_name": r.sent_by_session_name,
+                "sent_by_number": r.sent_by_number,
+                "updated_at": r.updated_at,
+            }
+            for r in recipients
+        ],
+    }
 
 
-@router.put("/{campaign_id}", response_model=CampaignRead)
+@router.put("/{campaign_id}")
 def update_campaign(
     campaign_id: int,
     campaign_in: CampaignUpdate,
@@ -424,10 +495,7 @@ def update_campaign(
     session.commit()
     session.refresh(campaign)
 
-    count = len(session.exec(
-        select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
-    ).all())
-    return _build_campaign_response(campaign, count)
+    return {"success": True}
 
 
 @router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -462,7 +530,7 @@ def delete_campaign(
     return None
 
 
-@router.post("/{campaign_id}/cancel", response_model=bool)
+@router.post("/{campaign_id}/cancel")
 def cancel_campaign(
     campaign_id: int,
     session: Session = Depends(get_session),
@@ -500,94 +568,121 @@ def cancel_campaign(
     
     session.commit()
 
-    return True
+    return {"success": True}
 
 
-# ──────────────────────────────────────────────
-# Campaign Recipients
-# ──────────────────────────────────────────────
-
-@router.get("/{campaign_id}/recipients", response_model=List[CampaignRecipientRead])
-def get_campaign_recipients(
+@router.post("/{campaign_id}/resend", status_code=status.HTTP_201_CREATED)
+def resend_campaign_recipients(
     campaign_id: int,
+    resend_data: CampaignResendRequest,
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """List all recipients for a campaign."""
-    campaign = session.get(Campaign, campaign_id)
-    if not campaign:
+    """Resend selected recipients as a new campaign."""
+    # Validate original campaign
+    original = session.get(Campaign, campaign_id)
+    if not original:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.user_id != current_user.id:
+    if original.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    recipients = session.exec(
-        select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
+    # Get selected recipients (must belong to this campaign)
+    selected = session.exec(
+        select(CampaignRecipient).where(
+            CampaignRecipient.id.in_(resend_data.recipient_ids),
+            CampaignRecipient.campaign_id == campaign_id,
+        )
     ).all()
+    if not selected:
+        raise HTTPException(status_code=400, detail="No valid recipients found")
 
-    return [
-        {
-            "id": r.id,
-            "phone_number": r.phone_number,
-            "row_data": json.loads(r.row_data),
-            "rendered_message": r.rendered_message,
-            "status": r.status,
-            "error_message": r.error_message,
-            "sent_by_session_name": r.sent_by_session_name,
-            "sent_by_number": r.sent_by_number,
-            "updated_at": r.updated_at,
-        }
-        for r in recipients
-    ]
+    # Resolve sender phones (validates WORKING status)
+    resolved_phones = _resolve_phone_ids(session, resend_data.phone_ids, resend_data.phone_group_ids, current_user.id)
+
+    # Filter out blacklisted numbers
+    blacklisted = set(
+        session.exec(select(Blacklist.phone_number).where(Blacklist.user_id == current_user.id)).all()
+    )
+    deliverable = [r for r in selected if r.phone_number not in blacklisted]
+    if not deliverable:
+        raise HTTPException(status_code=400, detail="All selected recipients are blacklisted")
+
+    # Schedule time
+    scheduled_at = resend_data.scheduled_at
+    if scheduled_at.tzinfo is None:
+        scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+
+    # Create new campaign (copy immutable fields from original)
+    new_campaign = Campaign(
+        name=f"إعادة إرسال - {original.name}",
+        description=original.description,
+        template_id=original.template_id,
+        template_group_id=original.template_group_id,
+        use_group=original.use_group,
+        sender_phone_ids=json.dumps(resolved_phones),
+        phone_column=original.phone_column,
+        variable_mapping=original.variable_mapping,
+        scheduled_at=scheduled_at,
+        user_id=current_user.id,
+    )
+    session.add(new_campaign)
+    session.commit()
+    session.refresh(new_campaign)
+
+    # Get sender session_ids for round-robin
+    phones = session.exec(select(Phone).where(Phone.id.in_(resolved_phones))).all()
+    phone_map = {p.id: p.session_id for p in phones}
+    sender_session_ids = [phone_map[pid] for pid in resolved_phones if pid in phone_map]
+
+    # Create recipients and outbox messages
+    recipients = []
+    outbox_messages = []
+    for i, orig_r in enumerate(deliverable):
+        recipient = CampaignRecipient(
+            phone_number=orig_r.phone_number,
+            row_data=orig_r.row_data,
+            campaign_id=new_campaign.id,
+            rendered_message=orig_r.rendered_message,
+        )
+        recipients.append(recipient)
+        session.add(recipient)
+
+        assigned_idx = i % len(sender_session_ids)
+        session_id = sender_session_ids[assigned_idx]
+        fallback_ids = [sid for idx, sid in enumerate(sender_session_ids) if idx != assigned_idx]
+
+        outbox_messages.append({
+            "session_id": session_id,
+            "fallback_session_ids": fallback_ids,
+            "payload": {
+                "to": orig_r.phone_number,
+                "text": orig_r.rendered_message,
+            },
+            "scheduled_at": scheduled_at,
+            "user_id": current_user.id,
+            "priority": 100,
+            "campaign_id": new_campaign.id,
+            "recipient_index": len(recipients) - 1,
+        })
+
+    session.flush()
+
+    for msg in outbox_messages:
+        idx = msg.pop("recipient_index")
+        recipient = recipients[idx]
+        msg["payload"]["campaign_recipient_id"] = recipient.id
+
+    session.commit()
+
+    from app.api.outbox.routes import bulk_insert_outbox
+    if outbox_messages:
+        bulk_insert_outbox(outbox_messages)
+
+    new_campaign.status = "scheduled"
+    session.add(new_campaign)
+    session.commit()
+    session.refresh(new_campaign)
+
+    return {"success": True}
 
 
-@router.get("/{campaign_id}/report")
-def get_campaign_report(
-    campaign_id: int,
-    session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_user)
-):
-    """Get a summary report for a campaign."""
-    campaign = session.get(Campaign, campaign_id)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    recipients = session.exec(
-        select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
-    ).all()
-
-    total = len(recipients)
-    sent = sum(1 for r in recipients if r.status == "sent")
-    failed = sum(1 for r in recipients if r.status == "failed")
-    pending = sum(1 for r in recipients if r.status == "pending")
-    cancelled = sum(1 for r in recipients if r.status == "cancelled")
-
-    if campaign.status == "scheduled" and total > 0 and pending == 0:
-        campaign.status = "finished"
-        session.add(campaign)
-        session.commit()
-
-    return {
-        "campaign": _build_campaign_response(campaign, total),
-        "summary": {
-            "total": total,
-            "sent": sent,
-            "failed": failed,
-            "pending": pending,
-            "cancelled": cancelled,
-        },
-        "recipients": [
-            {
-                "id": r.id,
-                "phone_number": r.phone_number,
-                "rendered_message": r.rendered_message,
-                "status": r.status,
-                "error_message": r.error_message,
-                "sent_by_session_name": r.sent_by_session_name,
-                "sent_by_number": r.sent_by_number,
-                "updated_at": r.updated_at,
-            }
-            for r in recipients
-        ],
-    }
