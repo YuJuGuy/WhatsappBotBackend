@@ -30,6 +30,7 @@ class OutboxMessage(SQLModel, table=True):
     
     user_id: int = Field(foreign_key="user.id", index=True)
     priority: int = Field(default=100, index=True)
+    source_feature: Optional[str] = Field(default=None, index=True)
     
     campaign_id: Optional[int] = Field(default=None, foreign_key="campaign.id", index=True)
     train_id: Optional[int] = Field(default=None, foreign_key="train_session.id", index=True)

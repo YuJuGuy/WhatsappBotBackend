@@ -1,5 +1,8 @@
-from sqlmodel import SQLModel, Field, Relationship
-from typing import Optional, List, TYPE_CHECKING
+from datetime import date
+from typing import Optional, List, TYPE_CHECKING, Any
+
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlmodel import SQLModel, Field, Relationship, Column
 
 if TYPE_CHECKING:
     from app.models.phone import Phone, Group
@@ -11,6 +14,7 @@ if TYPE_CHECKING:
     from app.models.outbox import OutboxMessage
     from app.models.blacklist import Blacklist
     from app.models.train import TrainSession
+    from app.models.storage import StoredFile
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -19,6 +23,8 @@ class User(SQLModel, table=True):
     is_active: bool = Field(default=True)
     is_superuser: bool = Field(default=False)
     full_name: Optional[str] = None
+    expiry_date: Optional[date] = Field(default=None, index=True)
+    allowed_features: Any = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default='[]'))
     
     # Relationships
     phones: List["Phone"] = Relationship(back_populates="user")
@@ -32,3 +38,4 @@ class User(SQLModel, table=True):
     outbox_messages: List["OutboxMessage"] = Relationship(back_populates="user")
     blacklist: List["Blacklist"] = Relationship(back_populates="user")
     train_sessions: List["TrainSession"] = Relationship(back_populates="user")
+    stored_files: List["StoredFile"] = Relationship(back_populates="user")

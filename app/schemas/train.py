@@ -27,6 +27,7 @@ class ProviderConfig(BaseModel):
 # ── Generate (kick off background generation) ────────────
 
 class TrainGenerateRequest(BaseModel):
+    name: Optional[str] = None
     session_id_1: str
     session_id_2: str
     days: int = 1
@@ -42,9 +43,13 @@ class TrainStartRequest(BaseModel):
 
 # ── Read / List ──────────────────────────────────────────
 
+class TrainUpdateRequest(BaseModel):
+    name: str
+
 class TrainMessageRead(BaseModel):
     id: int
-    sender_session_id: str
+    sender_phone_name: Optional[str] = None
+    sender_side: int = 1
     receiver_phone_number: str
     text: str
     day_number: int
@@ -62,10 +67,8 @@ class TrainSessionRead(BaseModel):
     id: int
     name: Optional[str] = None
     status: str
-    session_id_1: str
-    session_id_2: str
-    phone_number_1: str
-    phone_number_2: str
+    phone_name_1: Optional[str] = None
+    phone_name_2: Optional[str] = None
     total_days: int
     messages_per_day: int
     scheduled_at: Optional[datetime] = None

@@ -8,7 +8,15 @@ from app.models.outbox import OutboxMessage
 
 router = APIRouter()
 
-def insert_outbox(session_id: str, payload: dict, scheduled_at: datetime, user_id: int, priority: int, session: Session = None) -> int:
+def insert_outbox(
+    session_id: str,
+    payload: dict,
+    scheduled_at: datetime,
+    user_id: int,
+    priority: int,
+    session: Session = None,
+    source_feature: str | None = None,
+) -> int:
     """
     Insert a single message into outbox_messages table using SQLModel.
     """
@@ -23,7 +31,8 @@ def insert_outbox(session_id: str, payload: dict, scheduled_at: datetime, user_i
             payload=payload,
             scheduled_at=scheduled_at,
             user_id=user_id,
-            priority=priority
+            priority=priority,
+            source_feature=source_feature,
         )
 
         session.add(outbox)
@@ -58,6 +67,7 @@ def bulk_insert_outbox(messages: List[Dict[str, Any]], batch_size: int = 1000, s
                     scheduled_at=msg["scheduled_at"],
                     user_id=msg["user_id"],
                     priority=msg.get("priority", 100),
+                    source_feature=msg.get("source_feature"),
                     campaign_id=msg.get("campaign_id"),
                     train_id=msg.get("train_id"),
                     fallback_session_ids=msg.get("fallback_session_ids", [])
@@ -69,5 +79,4 @@ def bulk_insert_outbox(messages: List[Dict[str, Any]], batch_size: int = 1000, s
     finally:
         if close_session:
             session.close()
-
 

@@ -1,19 +1,23 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
+from sqlalchemy import func, literal
 from typing import List
 from datetime import datetime, timezone
 
-from app.api.deps import get_session, get_current_user
+from app.api.deps import get_session, get_current_user, require_feature, user_has_feature
+from app.core.features import Feature
 from app.api.outbox.routes import insert_outbox
 from app.models.user import User
 from app.models.phone import Phone
 from app.models.messages import Messages
-from app.models.autoreply import MessageAutoReplyRule, AutoReplyPhoneLink
+from app.models.autoreply import MessageAutoReplyRule, AutoReplyPhoneLink, enumMatchType
 from app.schemas.autoreply import MessageAutoReplyCreate, MessageAutoReplyUpdate, MessageAutoReplyRead
 from app.schemas.messages import MessageWebhookEvent
+from app.api.rate_limit import rate_limit_by_user
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature(Feature.auto_reply))])
 
 
 def _get_phone_ids(session: Session, rule_id: int) -> List[int]:
@@ -34,7 +38,42 @@ def _sync_phone_links(session: Session, rule_id: int, phone_ids: List[int]):
         session.add(AutoReplyPhoneLink(rule_id=rule_id, phone_id=pid))
 
 
-@router.post("/")
+def _find_best_matching_rule(session: Session, phone_id: int, message_body: str):
+    # Fetch all active rules for this specific phone (usually a very small number, e.g., 5-20)
+    rules = session.exec(
+        select(MessageAutoReplyRule)
+        .join(AutoReplyPhoneLink, AutoReplyPhoneLink.rule_id == MessageAutoReplyRule.id)
+        .where(
+            AutoReplyPhoneLink.phone_id == phone_id,
+            MessageAutoReplyRule.is_active == True,
+        )
+    ).all()
+
+    if not rules:
+        return None
+
+    candidates = []
+    message_body_lower = message_body.lower()
+    
+    for rule in rules:
+        trigger = rule.trigger_text.lower()
+        if rule.match_type == "exact" and trigger == message_body_lower:
+            candidates.append(rule)
+        elif rule.match_type == "starts_with" and message_body_lower.startswith(trigger):
+            candidates.append(rule)
+        elif rule.match_type == "ends_with" and message_body_lower.endswith(trigger):
+            candidates.append(rule)
+        elif rule.match_type == "contains" and trigger in message_body_lower:
+            candidates.append(rule)
+
+    if not candidates:
+        return None
+
+    # Return the rule with the lowest priority number, breaking ties with lowest ID
+    return min(candidates, key=lambda rule: (rule.rule_priority, rule.id))
+
+
+@router.post("/", dependencies=[Depends(rate_limit_by_user(20, 60, "autoreply-create"))])
 def create_autoreply(
     data: MessageAutoReplyCreate,
     session: Session = Depends(get_session),
@@ -108,7 +147,7 @@ def get_autoreply(
     )
 
 
-@router.put("/{rule_id}")
+@router.put("/{rule_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "autoreply-update"))])
 def update_autoreply(
     rule_id: int,
     data: MessageAutoReplyUpdate,
@@ -137,7 +176,7 @@ def update_autoreply(
     return {"success": True}
 
 
-@router.delete("/{rule_id}")
+@router.delete("/{rule_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "autoreply-delete"))])
 def delete_autoreply(
     rule_id: int,
     session: Session = Depends(get_session),
@@ -151,7 +190,7 @@ def delete_autoreply(
     return {"success": True}
 
 
-async def message_webhook(event: MessageWebhookEvent):
+async def message_webhook(event: MessageWebhookEvent, is_sandbox: bool = False):
     """Called directly from the global webhook handler - NOT a route."""
     session_id = event.session
     raw_from = event.payload.from_number
@@ -191,47 +230,19 @@ async def message_webhook(event: MessageWebhookEvent):
             print(f"[Webhook] Phone not found for session: {session_id}")
             return
 
-        if phone.number and from_number_bare == phone.number:
-            print(f"[Webhook] Skipping message from own number")
-            return
-
         print(f"[Webhook] Found phone: id={phone.id}, user_id={phone.user_id}")
 
-        rules = session.exec(
-            select(MessageAutoReplyRule)
-            .join(AutoReplyPhoneLink, AutoReplyPhoneLink.rule_id == MessageAutoReplyRule.id)
-            .where(
-                AutoReplyPhoneLink.phone_id == phone.id,
-                MessageAutoReplyRule.is_active == True,
-            )
-            .order_by(MessageAutoReplyRule.rule_priority.desc())
-        ).all()
-        if not rules:
-            print(f"[Webhook] No rules found for phone: {phone.id}")
+        user = session.get(User, phone.user_id)
+        if not user or not user_has_feature(user, Feature.auto_reply):
+            print(f"[Webhook] Skipping auto-reply for disabled feature")
             return
 
-        print(f"[Webhook] Found {len(rules)} rules for phone: {phone.id}")
-
-        rule_to_use = None
-        for rule in rules:
-            if rule.match_type == "exact":
-                if message_body == rule.trigger_text:
-                    rule_to_use = rule
-                    break
-            elif rule.match_type == "contains":
-                if rule.trigger_text in message_body:
-                    rule_to_use = rule
-                    break
-            elif rule.match_type == "starts_with":
-                if message_body.startswith(rule.trigger_text):
-                    rule_to_use = rule
-                    break
-            elif rule.match_type == "ends_with":
-                if message_body.endswith(rule.trigger_text):
-                    rule_to_use = rule
-                    break
+        rule_to_use = _find_best_matching_rule(session, phone.id, message_body)
 
         if rule_to_use:
+            if is_sandbox:
+                return rule_to_use.response_text
+                
             now = datetime.now(timezone.utc)
             outbox_id = insert_outbox(
                 session_id=session_id,
@@ -242,10 +253,12 @@ async def message_webhook(event: MessageWebhookEvent):
                 scheduled_at=now,
                 user_id=phone.user_id,
                 priority=rule_to_use.priority,
+                source_feature=Feature.auto_reply.value,
             )
             print(f"[Webhook] Outbox message created: id={outbox_id}")
         else:
             print(f"[Webhook] No rule matched for message: {message_body}")
+        return None
     finally:
         session.close()
 
@@ -254,7 +267,7 @@ def save_message(event: MessageWebhookEvent):
     """Save a message to the database."""
     if not event.user_id:
         print("[Webhook] Skipping save_message: No user_id in webhook headers")
-        return None
+        return None, False
 
     session = next(get_session())
     try:
@@ -305,12 +318,17 @@ def save_message(event: MessageWebhookEvent):
             timestamp=message_timestamp,
         )
         session.add(message)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            print(f"[Webhook] Duplicate message skipped: waha_message_id={event.payload.id}")
+            return None, False
         session.refresh(message)
         print(f"[Webhook] Saved message: id={message.id}")
-        return message
+        return message, True
     except Exception as e:
         print(f"[Webhook] Error saving message: {e}")
-        return None
+        return None, False
     finally:
         session.close()

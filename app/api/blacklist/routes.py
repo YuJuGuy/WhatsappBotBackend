@@ -1,15 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.schemas.blacklist import BlacklistRead, BlacklistCreate, BulkBlacklistRequest, BulkBlacklistDeleteRequest
-from app.api.deps import get_session, get_current_user
+from app.api.deps import get_session, get_current_user, require_feature
+from app.core.features import Feature
 from app.models.blacklist import Blacklist
 from app.models.campaign import CampaignRecipient
 from app.models.user import User
 from sqlmodel import Session, select
+from app.api.rate_limit import rate_limit_by_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature(Feature.blacklist))])
 
 
-@router.post("/bulk")
+@router.post("/bulk", dependencies=[Depends(rate_limit_by_user(5, 60, "blacklist-bulk-create"))])
 def bulk_blacklist(
     req: BulkBlacklistRequest,
     session: Session = Depends(get_session),
@@ -32,7 +34,10 @@ def bulk_blacklist(
     # Get existing blacklisted numbers for this user
     existing = set(
         session.exec(
-            select(Blacklist.phone_number).where(Blacklist.user_id == current_user.id)
+            select(Blacklist.phone_number).where(
+                Blacklist.user_id == current_user.id,
+                Blacklist.phone_number.in_(numbers)
+            )
         ).all()
     )
 
@@ -49,7 +54,11 @@ def bulk_blacklist(
     return {"success": True}
 
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_user(20, 60, "blacklist-create"))],
+)
 def create_blacklist(
     blacklist_in: BlacklistCreate,
     session: Session = Depends(get_session),
@@ -93,7 +102,7 @@ def get_blacklist(
     return results
 
 
-@router.delete("/bulk")
+@router.delete("/bulk", dependencies=[Depends(rate_limit_by_user(10, 60, "blacklist-bulk-delete"))])
 def delete_bulk_blacklist(
     req: BulkBlacklistDeleteRequest,
     session: Session = Depends(get_session),
@@ -113,7 +122,7 @@ def delete_bulk_blacklist(
     session.commit()
     return {"success": True}
 
-@router.delete("/{blacklist_id}")
+@router.delete("/{blacklist_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "blacklist-delete"))])
 def delete_blacklist(
     blacklist_id: int,
     session: Session = Depends(get_session),

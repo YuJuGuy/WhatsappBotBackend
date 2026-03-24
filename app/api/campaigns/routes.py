@@ -5,19 +5,24 @@ import re
 import phonenumbers
 from io import BytesIO
 from sqlmodel import Session, select, update
+from sqlalchemy import case, func, or_
 from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignRead, CampaignRecipientRead, CampaignResendRequest
 from app.models.outbox import OutboxMessage
-from app.api.deps import get_session, get_current_user
+from app.api.deps import get_session, get_current_user, require_feature
+from app.core.features import Feature
+from app.core.storage import resolve_storage_path
 from app.models.campaign import Campaign, CampaignRecipient
 from app.models.template import Template, TemplateGroup, TemplateGroupLink
 from app.models.phone import Phone, Group, PhoneGroupLink
+from app.models.storage import StoredFile
 from app.models.user import User
 from app.models.blacklist import Blacklist
 from datetime import datetime, timezone
 from openpyxl import load_workbook
+from app.api.rate_limit import rate_limit_by_user
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature(Feature.campaigns))])
 
 
 # ──────────────────────────────────────────────
@@ -175,13 +180,78 @@ def _build_campaign_response(campaign: Campaign, recipient_count: int) -> dict:
     }
 
 
+def _build_recipient_filters(campaign_id: int, status_filter: Optional[str], search: Optional[str]):
+    filters = [CampaignRecipient.campaign_id == campaign_id]
+
+    normalized_status = (status_filter or "all").strip().lower()
+    if normalized_status and normalized_status != "all":
+        filters.append(CampaignRecipient.status == normalized_status)
+
+    normalized_search = (search or "").strip()
+    if normalized_search:
+        pattern = f"%{normalized_search}%"
+        filters.append(
+            or_(
+                CampaignRecipient.phone_number.ilike(pattern),
+                CampaignRecipient.rendered_message.ilike(pattern),
+                CampaignRecipient.error_message.ilike(pattern),
+            )
+        )
+
+    return filters
+
+
+def _build_recipient_order(sort_by: Optional[str], sort_dir: str):
+    direction = (sort_dir or "desc").lower()
+    descending = direction == "desc"
+
+    sort_column = {
+        "phone_number": CampaignRecipient.phone_number,
+        "rendered_message": CampaignRecipient.rendered_message,
+        "status": CampaignRecipient.status,
+        "updated_at": CampaignRecipient.updated_at,
+        "error_message": CampaignRecipient.error_message,
+        "sender": func.coalesce(CampaignRecipient.sent_by_session_name, CampaignRecipient.sent_by_number, ""),
+    }.get(sort_by or "updated_at", CampaignRecipient.updated_at)
+
+    return sort_column.desc() if descending else sort_column.asc()
+
+
+def _get_campaign_summary(session: Session, campaign_id: int) -> dict:
+    counts = session.exec(
+        select(CampaignRecipient.status, func.count(CampaignRecipient.id))
+        .where(CampaignRecipient.campaign_id == campaign_id)
+        .group_by(CampaignRecipient.status)
+    ).all()
+
+    summary = {
+        "total": 0,
+        "sent": 0,
+        "failed": 0,
+        "pending": 0,
+        "cancelled": 0,
+        "skipped": 0,
+    }
+
+    for status_name, count in counts:
+        summary["total"] += count
+        if status_name in summary:
+            summary[status_name] = count
+
+    return summary
+
+
 # ──────────────────────────────────────────────
 # Campaign CRUD
 # ──────────────────────────────────────────────
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_user(10, 60, "campaign-create"))],
+)
 async def create_campaign(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
     campaign_data: str = Form(...),
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
@@ -196,12 +266,32 @@ async def create_campaign(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid campaign data: {str(e)}")
 
-    # Validate file type
-    if not file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="File must be .xlsx or .xls")
+    if file is not None and data.stored_file_id is not None:
+        raise HTTPException(status_code=400, detail="Choose either an uploaded file or a stored file")
 
-    # Read file
-    file_bytes = await file.read()
+    if file is None and data.stored_file_id is None:
+        raise HTTPException(status_code=400, detail="A recipient file is required")
+
+    if data.stored_file_id is not None:
+        stored_file = session.get(StoredFile, data.stored_file_id)
+        if not stored_file or stored_file.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Stored file not found")
+        if stored_file.expires_at < datetime.utcnow():
+            raise HTTPException(status_code=400, detail="The selected stored file has expired")
+
+        file_path = resolve_storage_path(stored_file.relative_path)
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Stored file content not found")
+
+        if not stored_file.original_name.lower().endswith((".xlsx", ".xls")):
+            raise HTTPException(status_code=400, detail="Stored file must be .xlsx or .xls")
+
+        file_bytes = file_path.read_bytes()
+    else:
+        assert file is not None
+        if not (file.filename or "").lower().endswith((".xlsx", ".xls")):
+            raise HTTPException(status_code=400, detail="File must be .xlsx or .xls")
+        file_bytes = await file.read()
 
     # Parse XLSX
     headers, data_rows = _parse_xlsx(file_bytes, data.sheet_name)
@@ -344,6 +434,7 @@ async def create_campaign(
             "scheduled_at": scheduled_at_aware,
             "user_id": current_user.id,
             "priority": 100,
+            "source_feature": Feature.campaigns.value,
             "campaign_id": campaign.id,
             "recipient_index": len(recipients) - 1,  # track which recipient this belongs to
         })
@@ -381,22 +472,31 @@ def get_campaigns(
     campaigns = session.exec(
         select(Campaign).where(Campaign.user_id == current_user.id)
     ).all()
+
+    campaign_ids = [campaign.id for campaign in campaigns if campaign.id is not None]
+    counts_by_campaign = {}
+    pending_by_campaign = {}
+    if campaign_ids:
+        stats_rows = session.exec(
+            select(
+                CampaignRecipient.campaign_id,
+                func.count(CampaignRecipient.id),
+                func.sum(case((CampaignRecipient.status == "pending", 1), else_=0)),
+            )
+            .where(CampaignRecipient.campaign_id.in_(campaign_ids))
+            .group_by(CampaignRecipient.campaign_id)
+        ).all()
+        counts_by_campaign = {campaign_id: total for campaign_id, total, _pending in stats_rows}
+        pending_by_campaign = {campaign_id: pending or 0 for campaign_id, _total, pending in stats_rows}
+
     result = []
     dirty = False
     for c in campaigns:
-        # Get total count
-        count = len(session.exec(
-            select(CampaignRecipient).where(CampaignRecipient.campaign_id == c.id)
-        ).all())
+        count = counts_by_campaign.get(c.id, 0)
         
         # Determine if finished
         if c.status == "scheduled":
-            pending_count = len(session.exec(
-                select(CampaignRecipient).where(
-                    CampaignRecipient.campaign_id == c.id,
-                    CampaignRecipient.status == "pending"
-                )
-            ).all())
+            pending_count = pending_by_campaign.get(c.id, 0)
             if count > 0 and pending_count == 0:
                 c.status = "finished"
                 session.add(c)
@@ -413,42 +513,52 @@ def get_campaigns(
 @router.get("/{campaign_id}")
 def get_campaign(
     campaign_id: int,
+    page: int = 1,
+    page_size: int = 100,
+    status_filter: str = "all",
+    search: Optional[str] = None,
+    sort_by: str = "updated_at",
+    sort_dir: str = "desc",
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
-    """Get a single campaign with full report (summary + recipients)."""
+    """Get a single campaign with summary data and a paginated recipient report."""
     campaign = session.get(Campaign, campaign_id)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     if campaign.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    recipients = session.exec(
-        select(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id)
-    ).all()
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 200)
 
-    total = len(recipients)
-    sent = sum(1 for r in recipients if r.status == "sent")
-    failed = sum(1 for r in recipients if r.status == "failed")
-    pending = sum(1 for r in recipients if r.status == "pending")
-    cancelled = sum(1 for r in recipients if r.status == "cancelled")
-    skipped = sum(1 for r in recipients if r.status == "skipped")
+    summary = _get_campaign_summary(session, campaign.id)
+    total = summary["total"]
+    pending = summary["pending"]
 
     if campaign.status == "scheduled" and total > 0 and pending == 0:
         campaign.status = "finished"
         session.add(campaign)
         session.commit()
 
+    filters = _build_recipient_filters(campaign.id, status_filter, search)
+    filtered_total = session.exec(
+        select(func.count(CampaignRecipient.id)).where(*filters)
+    ).one()
+    total_pages = max((filtered_total + page_size - 1) // page_size, 1)
+    page = min(page, total_pages)
+
+    recipients = session.exec(
+        select(CampaignRecipient)
+        .where(*filters)
+        .order_by(_build_recipient_order(sort_by, sort_dir), CampaignRecipient.id.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+
     return {
         "campaign": _build_campaign_response(campaign, total),
-        "summary": {
-            "total": total,
-            "sent": sent,
-            "failed": failed,
-            "pending": pending,
-            "cancelled": cancelled,
-            "skipped": skipped,
-        },
+        "summary": summary,
         "recipients": [
             {
                 "id": r.id,
@@ -462,10 +572,16 @@ def get_campaign(
             }
             for r in recipients
         ],
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "filtered_total": filtered_total,
+            "total_pages": total_pages,
+        },
     }
 
 
-@router.put("/{campaign_id}")
+@router.put("/{campaign_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "campaign-update"))])
 def update_campaign(
     campaign_id: int,
     campaign_in: CampaignUpdate,
@@ -498,7 +614,11 @@ def update_campaign(
     return {"success": True}
 
 
-@router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{campaign_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit_by_user(5, 60, "campaign-delete"))],
+)
 def delete_campaign(
     campaign_id: int,
     session: Session = Depends(get_session),
@@ -530,7 +650,7 @@ def delete_campaign(
     return None
 
 
-@router.post("/{campaign_id}/cancel")
+@router.post("/{campaign_id}/cancel", dependencies=[Depends(rate_limit_by_user(5, 60, "campaign-cancel"))])
 def cancel_campaign(
     campaign_id: int,
     session: Session = Depends(get_session),
@@ -571,7 +691,11 @@ def cancel_campaign(
     return {"success": True}
 
 
-@router.post("/{campaign_id}/resend", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{campaign_id}/resend",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_user(5, 60, "campaign-resend"))],
+)
 def resend_campaign_recipients(
     campaign_id: int,
     resend_data: CampaignResendRequest,
@@ -661,6 +785,7 @@ def resend_campaign_recipients(
             "scheduled_at": scheduled_at,
             "user_id": current_user.id,
             "priority": 100,
+            "source_feature": Feature.campaigns.value,
             "campaign_id": new_campaign.id,
             "recipient_index": len(recipients) - 1,
         })
@@ -684,5 +809,3 @@ def resend_campaign_recipients(
     session.refresh(new_campaign)
 
     return {"success": True}
-
-

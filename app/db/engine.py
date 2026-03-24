@@ -10,6 +10,7 @@ from app.models.autoreply import MessageAutoReplyRule, AutoReplyPhoneLink
 from app.models.outbox import OutboxMessage
 from app.models.blacklist import Blacklist
 from app.models.train import TrainSession, TrainMessage
+from app.models.storage import StoredFile
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:22101975@localhost:5432/postgres")
 

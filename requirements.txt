@@ -5,3 +5,4 @@ sqlmodel
 "python-jose[cryptography]"
 psycopg2-binary
 openpyxl
+redis

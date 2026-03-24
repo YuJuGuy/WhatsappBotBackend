@@ -4,6 +4,7 @@ from app.schemas.settings import SettingsRead, SettingsUpdate
 from app.api.deps import get_session, get_current_user
 from app.models.settings import Settings
 from app.models.user import User
+from app.api.rate_limit import rate_limit_by_user
 
 
 
@@ -21,7 +22,7 @@ def get_settings(
     return settings
 
 
-@router.put("/")
+@router.put("/", dependencies=[Depends(rate_limit_by_user(20, 60, "settings-update"))])
 def update_settings(
     settings_in: SettingsUpdate,
     session: Session = Depends(get_session),

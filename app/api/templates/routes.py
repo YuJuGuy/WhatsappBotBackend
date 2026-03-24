@@ -4,18 +4,26 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 from app.schemas.template import TemplateCreate, TemplateUpdate, TemplateRead
 from app.schemas.template import TemplateGroupCreate, TemplateGroupUpdate, TemplateGroupRead
-from app.api.deps import get_session, get_current_user
+from app.api.deps import get_session, get_current_user, require_feature
+from app.core.features import Feature
+from app.api.rate_limit import rate_limit_by_user
 from app.models.template import Template, TemplateGroup, TemplateGroupLink
+from app.models.campaign import Campaign
+from app.models.call import CallAutoReplyConfig
 from app.models.user import User
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature(Feature.templates))])
 
 
 # ──────────────────────────────────────────────
 # Template CRUD
 # ──────────────────────────────────────────────
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_user(20, 60, "template-create"))],
+)
 def create_template(
     template_in: TemplateCreate,
     session: Session = Depends(get_session),
@@ -39,7 +47,10 @@ def get_templates(
 ):
     """List all templates for the current user."""
     templates = session.exec(
-        select(Template).where(Template.user_id == current_user.id)
+        select(Template).where(
+            Template.user_id == current_user.id,
+            Template.is_archived == False,
+        )
     ).all()
     return templates
 
@@ -59,7 +70,7 @@ def get_template(
     return template
 
 
-@router.put("/{template_id}")
+@router.put("/{template_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "template-update"))])
 def update_template(
     template_id: int,
     template_in: TemplateUpdate,
@@ -83,7 +94,11 @@ def update_template(
     return {"success": True}
 
 
-@router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{template_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit_by_user(20, 60, "template-delete"))],
+)
 def delete_template(
     template_id: int,
     session: Session = Depends(get_session),
@@ -95,11 +110,18 @@ def delete_template(
         raise HTTPException(status_code=404, detail="Template not found")
     if template.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to access this template")
-    # Check if template is used in any group
-    link = session.exec(select(TemplateGroupLink).where(TemplateGroupLink.template_id == template_id)).first()
-    if link:
-        raise HTTPException(status_code=400, detail="Template is used in a template group, Delete the template group first.")
-    session.delete(template)
+
+    is_used = any([
+        session.exec(select(TemplateGroupLink).where(TemplateGroupLink.template_id == template_id)).first(),
+        session.exec(select(Campaign).where(Campaign.template_id == template_id)).first(),
+        session.exec(select(CallAutoReplyConfig).where(CallAutoReplyConfig.default_template_id == template_id)).first(),
+    ])
+
+    if is_used:
+        template.is_archived = True
+        session.add(template)
+    else:
+        session.delete(template)
     session.commit()
     return None
 
@@ -110,7 +132,10 @@ def delete_template(
 
 def _build_group_response(group: TemplateGroup) -> dict:
     """Build a response dict with nested templates sorted by position."""
-    templates = sorted(group.template_links, key=lambda l: l.position)
+    templates = sorted(
+        [link for link in group.template_links if link.template and not link.template.is_archived],
+        key=lambda l: l.position,
+    )
     return {
         "id": group.id,
         "name": group.name,
@@ -139,7 +164,7 @@ def _sync_template_links(
     # Create new links
     for position, tid in enumerate(template_ids):
         template = session.get(Template, tid)
-        if not template or template.user_id != current_user_id:
+        if not template or template.user_id != current_user_id or template.is_archived:
             raise HTTPException(
                 status_code=400,
                 detail=f"Template with id {tid} not found or not owned by you"
@@ -152,7 +177,11 @@ def _sync_template_links(
         session.add(link)
 
 
-@router.post("/groups/", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/groups/",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_user(20, 60, "template-group-create"))],
+)
 def create_template_group(
     group_in: TemplateGroupCreate,
     session: Session = Depends(get_session),
@@ -208,7 +237,7 @@ def get_template_group(
     return _build_group_response(group)
 
 
-@router.put("/groups/{group_id}")
+@router.put("/groups/{group_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "template-group-update"))])
 def update_template_group(
     group_id: int,
     group_in: TemplateGroupUpdate,
@@ -237,7 +266,11 @@ def update_template_group(
     return {"success": True}
 
 
-@router.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/groups/{group_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit_by_user(20, 60, "template-group-delete"))],
+)
 def delete_template_group(
     group_id: int,
     session: Session = Depends(get_session),

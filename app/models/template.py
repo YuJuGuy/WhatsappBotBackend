@@ -22,6 +22,7 @@ class Template(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     body: str
+    is_archived: bool = Field(default=False, index=True)
 
     # Foreign key to User
     user_id: int = Field(foreign_key="user.id", index=True)

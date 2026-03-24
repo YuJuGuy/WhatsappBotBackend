@@ -201,6 +201,10 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# App-managed temporary uploads
+storage/*
+!storage/.gitignore
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

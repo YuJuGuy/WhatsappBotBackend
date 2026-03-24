@@ -7,17 +7,27 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import Session, select
 from app.schemas.phone import PhoneBase, PhoneInfo, SessionStatusWebhookEvent
 from app.schemas.phone import PhoneGroupCreate, PhoneGroupUpdate, PhoneGroupRead
-from app.api.deps import get_session, get_current_user
+from app.api.deps import get_session, get_current_user, require_feature
+from app.core.features import Feature
+from app.api.rate_limit import rate_limit_by_user, rate_limit_by_user_and_path
 from app.models.phone import Phone, Group, PhoneGroupLink
+from app.models.messages import Messages
 from app.models.user import User
 from fastapi.responses import JSONResponse, Response
 from app.utils.waha import get_session_info, get_qr_code, request_code, create_session, start_session, delete_session, restart_session
 from dotenv import load_dotenv
 import os
 load_dotenv()
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature(Feature.phones))])
 
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
+
+
+def _waha_result_has_error(result: dict) -> bool:
+    status_code = result.get("statusCode")
+    if isinstance(status_code, int) and status_code >= 400:
+        return True
+    return bool(result.get("error"))
 
 
 # ──────────────────────────────────────────────
@@ -29,7 +39,7 @@ def generate_session_id():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(rate_limit_by_user(10, 60, "phone-create"))])
 def create_phone(
     phone_in: PhoneBase,
     session: Session = Depends(get_session),
@@ -49,7 +59,7 @@ def create_phone(
     return {"success": True}
 
 
-@router.put("/{phone_id}")
+@router.put("/{phone_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "phone-update"))])
 def update_phone(
     phone_id: int,
     phone_in: PhoneBase,
@@ -93,7 +103,7 @@ def get_phone(
     return phone
 
 
-@router.delete("/{phone_id}")
+@router.delete("/{phone_id}", dependencies=[Depends(rate_limit_by_user(10, 60, "phone-delete"))])
 async def delete_phone(
     phone_id: int,
     session: Session = Depends(get_session),
@@ -122,12 +132,26 @@ async def delete_phone(
         print(f"WAHA delete error: {type(e).__name__} - {e}")
         raise HTTPException(status_code=500, detail="فشل حذف الجلسة من WAHA، حاول مرة أخرى")
 
+    from sqlmodel import delete
+    session.exec(
+        delete(Messages).where(
+            Messages.user_id == current_user.id,
+            Messages.session_id == phone.session_id,
+        )
+    )
+
     session.delete(phone)
     session.commit()
     return {"success": True}
 
 
-@router.post("/{phone_id}/restart")
+@router.post(
+    "/{phone_id}/restart",
+    dependencies=[
+        Depends(rate_limit_by_user(5, 60, "phone-restart-user")),
+        Depends(rate_limit_by_user_and_path(2, 60, "phone-restart", "phone_id")),
+    ],
+)
 async def restart_phone_session(
     phone_id: int,
     session: Session = Depends(get_session),
@@ -149,6 +173,72 @@ async def restart_phone_session(
 
     # Map WAHA status directly
     phone.status = waha_status
+
+    session.add(phone)
+    session.commit()
+    session.refresh(phone)
+
+    return {
+        "status": phone.status,
+        "waha_status": waha_status,
+        "number": phone.number
+    }
+
+
+@router.post(
+    "/{phone_id}/start",
+    dependencies=[
+        Depends(rate_limit_by_user(5, 60, "phone-start-user")),
+        Depends(rate_limit_by_user_and_path(2, 60, "phone-start", "phone_id")),
+    ],
+)
+async def start_phone_session(
+    phone_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
+):
+    """Start or recreate a phone session explicitly."""
+    phone = session.get(Phone, phone_id)
+    if not phone:
+        raise HTTPException(status_code=404, detail="Phone not found")
+    if phone.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    try:
+        info = await get_session_info(phone.session_id)
+        current_status = info.get("status", "STOPPED")
+    except Exception:
+        info = {}
+        current_status = "STOPPED"
+
+    try:
+        if current_status == "STOPPED":
+            result = {}
+            try:
+                result = await start_session(phone.session_id)
+            except Exception:
+                result = {}
+
+            if _waha_result_has_error(result):
+                result = await create_session(
+                    phone.session_id,
+                    webhook_url=f"{WEBHOOK_BASE_URL}/api/webhook" if WEBHOOK_BASE_URL else "",
+                    user_id=phone.user_id,
+                )
+        else:
+            result = await restart_session(phone.session_id)
+            if _waha_result_has_error(result):
+                raise HTTPException(status_code=500, detail="Failed to restart session")
+        waha_status = result.get("status", "STARTING")
+        info = result
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to start session")
+
+    phone.status = waha_status
+    if waha_status == "WORKING":
+        me = info.get("me", {})
+        if me and me.get("id"):
+            phone.number = me["id"].split("@")[0]
 
     session.add(phone)
     session.commit()
@@ -184,19 +274,6 @@ async def check_phone_status(
     except Exception:
         waha_status = "STOPPED"
         info = {}
-
-    # If session doesn't exist or is stopped, create it
-    if waha_status == "STOPPED":
-        try:
-            create_result = await create_session(
-                phone.session_id, 
-                webhook_url=f"{WEBHOOK_BASE_URL}/api/webhook" if WEBHOOK_BASE_URL else "",
-                user_id=phone.user_id
-            )
-            waha_status = create_result.get("status", "STARTING")
-            info = create_result
-        except Exception:
-            waha_status = "STARTING"
 
     # Map WAHA status to our DB status
     # Map WAHA status directly
@@ -239,7 +316,13 @@ async def get_phone_qr(
         raise HTTPException(status_code=500, detail=f"Failed to get QR code: {str(e)}")
 
 
-@router.post("/{phone_id}/request-code")
+@router.post(
+    "/{phone_id}/request-code",
+    dependencies=[
+        Depends(rate_limit_by_user(5, 60, "phone-request-code-user")),
+        Depends(rate_limit_by_user_and_path(2, 60, "phone-request-code", "phone_id")),
+    ],
+)
 async def phone_request_code(
     phone_id: int,
     body: dict = None,
@@ -315,7 +398,11 @@ def _sync_phone_links(
         session.add(link)
 
 
-@router.post("/groups/", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/groups/",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_user(10, 60, "phone-group-create"))],
+)
 def create_phone_group(
     group_in: PhoneGroupCreate,
     session: Session = Depends(get_session),
@@ -371,7 +458,7 @@ def get_phone_group(
     return _build_group_response(group)
 
 
-@router.put("/groups/{group_id}")
+@router.put("/groups/{group_id}", dependencies=[Depends(rate_limit_by_user(10, 60, "phone-group-update"))])
 def update_phone_group(
     group_id: int,
     group_in: PhoneGroupUpdate,
@@ -400,7 +487,11 @@ def update_phone_group(
     return {"success": True}
 
 
-@router.delete("/groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/groups/{group_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit_by_user(10, 60, "phone-group-delete"))],
+)
 def delete_phone_group(
     group_id: int,
     session: Session = Depends(get_session),

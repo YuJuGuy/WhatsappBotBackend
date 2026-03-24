@@ -13,6 +13,7 @@ class CampaignCreate(BaseModel):
     template_id: Optional[int] = None
     template_group_id: Optional[int] = None
     use_group: bool = False
+    stored_file_id: Optional[int] = None
     phone_ids: Optional[List[int]] = None         # individual phone IDs
     phone_group_ids: Optional[List[int]] = None    # group IDs (resolved to phone IDs on backend)
     phone_column: str                              # which XLSX column has recipient numbers

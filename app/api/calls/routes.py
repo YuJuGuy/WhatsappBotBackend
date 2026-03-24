@@ -3,7 +3,8 @@ from sqlmodel import Session, select
 from typing import List
 from datetime import datetime, timezone
 
-from app.api.deps import get_session, get_current_user
+from app.api.deps import get_session, get_current_user, require_feature, user_has_feature
+from app.core.features import Feature
 from app.models.call import CallAutoReplyConfig, CallConfigPhoneLink
 from app.models.template import Template
 from app.models.phone import Phone
@@ -14,8 +15,9 @@ from app.schemas.call import (
 )
 from app.api.outbox.routes import insert_outbox
 from app.utils.waha import reject_call
+from app.api.rate_limit import rate_limit_by_user
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature(Feature.calls))])
 
 
 def _get_phone_ids(session: Session, config_id: int) -> List[int]:
@@ -65,7 +67,11 @@ def list_configs(
 # Create config
 # ──────────────────────────────────────────────
 
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_by_user(20, 60, "calls-create"))],
+)
 def create_config(
     data: CallAutoReplyCreate,
     session: Session = Depends(get_session),
@@ -109,7 +115,7 @@ def create_config(
 # Update config
 # ──────────────────────────────────────────────
 
-@router.put("/{config_id}")
+@router.put("/{config_id}", dependencies=[Depends(rate_limit_by_user(20, 60, "calls-update"))])
 def update_config(
     config_id: int,
     data: CallAutoReplyUpdate,
@@ -158,7 +164,11 @@ def update_config(
 # Delete config
 # ──────────────────────────────────────────────
 
-@router.delete("/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{config_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit_by_user(20, 60, "calls-delete"))],
+)
 def delete_config(
     config_id: int,
     session: Session = Depends(get_session),
@@ -205,6 +215,11 @@ async def call_webhook(event: CallWebhookEvent):
             return {"status": "error", "reason": f"Phone with session '{session_id}' not found"}
         print(f"[Webhook] Found phone: id={phone.id}, user_id={phone.user_id}")
 
+        user = session.get(User, phone.user_id)
+        if not user or not user_has_feature(user, Feature.calls):
+            print(f"[Webhook] Skipping call webhook for disabled calls feature")
+            return {"status": "ignored", "reason": "calls feature disabled"}
+
         config = session.exec(
             select(CallAutoReplyConfig)
             .join(CallConfigPhoneLink, CallConfigPhoneLink.config_id == CallAutoReplyConfig.id)
@@ -243,6 +258,7 @@ async def call_webhook(event: CallWebhookEvent):
             scheduled_at=now,
             user_id=phone.user_id,
             priority=config.priority,
+            source_feature=Feature.calls.value,
         )
 
         print(f"[Webhook] Outbox message created: id={outbox_id}")
