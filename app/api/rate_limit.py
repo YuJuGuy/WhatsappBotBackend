@@ -24,8 +24,14 @@ def _get_client_ip(request: Request) -> str:
 
 @lru_cache(maxsize=1)
 def _redis_client():
-    redis_url = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    redis_url = os.getenv("REDIS_URL")
+    client = redis.Redis.from_url(redis_url, decode_responses=True)
+    try:
+        client.ping()
+        logger.info("✅ Redis connected successfully for rate limiting")
+    except redis.exceptions.ConnectionError:
+        logger.warning("❌ Redis connection failed (is it running?). Rate limiting will be disabled (fail-open).")
+    return client
 
 
 def _consume_limit(bucket: str, limit: int, window_seconds: int) -> tuple[int, int]:
@@ -50,7 +56,7 @@ def _enforce_limit(bucket: str, limit: int, window_seconds: int, response: Respo
     try:
         count, ttl = _consume_limit(bucket, limit, window_seconds)
     except RedisError:
-        logger.exception("Rate limiter unavailable for bucket %s", bucket)
+        # Silently fail-open without full traceback to avoid log flooding
         return
 
     remaining = limit - count

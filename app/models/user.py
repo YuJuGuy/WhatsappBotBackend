@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, List, TYPE_CHECKING, Any
 
 from sqlalchemy.dialects.postgresql import JSONB
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from app.models.blacklist import Blacklist
     from app.models.train import TrainSession
     from app.models.storage import StoredFile
+    from app.models.tickets import Ticket, TicketCategory, TicketInboxShare
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -24,6 +25,7 @@ class User(SQLModel, table=True):
     is_superuser: bool = Field(default=False)
     full_name: Optional[str] = None
     expiry_date: Optional[date] = Field(default=None, index=True)
+    last_ticket_download_at: Optional[datetime] = Field(default=None)
     allowed_features: Any = Field(default_factory=list, sa_column=Column(JSONB, nullable=False, server_default='[]'))
     
     # Relationships
@@ -39,3 +41,13 @@ class User(SQLModel, table=True):
     blacklist: List["Blacklist"] = Relationship(back_populates="user")
     train_sessions: List["TrainSession"] = Relationship(back_populates="user")
     stored_files: List["StoredFile"] = Relationship(back_populates="user")
+    tickets: List["Ticket"] = Relationship(back_populates="user")
+    ticket_categories: List["TicketCategory"] = Relationship(back_populates="user")
+    shared_inboxes_out: List["TicketInboxShare"] = Relationship(
+        back_populates="owner",
+        sa_relationship_kwargs={"foreign_keys": "[TicketInboxShare.owner_id]", "cascade": "all, delete-orphan"}
+    )
+    shared_inboxes_in: List["TicketInboxShare"] = Relationship(
+        back_populates="shared_with",
+        sa_relationship_kwargs={"foreign_keys": "[TicketInboxShare.shared_with_id]", "cascade": "all, delete-orphan"}
+    )

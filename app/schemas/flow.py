@@ -1,12 +1,12 @@
 from pydantic import BaseModel, Field as PydanticField
 from typing import Optional, List, Dict, Any, Union, Literal, Annotated
 from datetime import datetime
-from app.models.flow import NodeType, FlowStatus, FlowRunStatus, EdgeType
+from app.models.flow import NodeType, FlowRunStatus, EdgeType
 
 
 class FlowBase(BaseModel):
     name: str
-    status: FlowStatus
+    is_active: bool = PydanticField(default=False)
     priority: int = PydanticField(default=50)
     message_priority: int = PydanticField(default=50)
     priority_over_autoreply: bool = PydanticField(default=True)
@@ -19,24 +19,46 @@ class FlowNodeDataBase(BaseModel):
     model_config = {"extra": "allow"}
 
 class StartNodeData(FlowNodeDataBase):
-    trigger_type: str  # e.g., "any", "equals"
+    trigger_type: Literal["any", "equals", "contains", "contains_any"]
     value: Optional[str] = None
 
 class ConditionNodeData(FlowNodeDataBase):
-    operator: str # e.g., "equals", "greater_than"
+    operator: Literal["equals", "contains", "contains_any"]
     value: str
 
+class FlowOptionCondition(BaseModel):
+    id: str
+    operator: Literal["equals", "contains", "contains_any"]
+    value: str
+
+class OptionsNodeData(FlowNodeDataBase):
+    options: List[FlowOptionCondition] = PydanticField(default_factory=list)
+
 class MessageSchedule(BaseModel):
-    type: str # e.g., "immediate", "delay"
+    type: Literal["immediate", "delay"]
     delay_seconds: Optional[int] = None
 
 class MessageNodeData(FlowNodeDataBase):
-    message_type: str # e.g., "static"
+    message_type: Literal["static"]
     text: str
     schedule: MessageSchedule
 
 class EndNodeData(FlowNodeDataBase):
     pass
+
+class ActionTicketNodeData(FlowNodeDataBase):
+    category_id: int
+    assignee_id: Optional[int] = None
+
+class WaitMessageNodeData(FlowNodeDataBase):
+    pass
+
+class ActionXlsxSearchData(FlowNodeDataBase):
+    file_id: Optional[int] = None
+    search_column: str
+    search_value: Optional[str] = None
+    result_column: str
+    variable_name: str
 
 
 # --- Discriminated Union for Nodes ---
@@ -52,22 +74,51 @@ class FlowNodeCondition(BaseModel):
     node_type: Literal[NodeType.CONDITION]
     node_data: ConditionNodeData
 
+class FlowNodeOptions(BaseModel):
+    node_id: str
+    node_type: Literal[NodeType.OPTIONS]
+    node_data: OptionsNodeData
+
 class FlowNodeMessage(BaseModel):
     node_id: str
     node_type: Literal[NodeType.MESSAGE]
     node_data: MessageNodeData
+
+class FlowNodeActionTicket(BaseModel):
+    node_id: str
+    node_type: Literal[NodeType.ACTION_TICKET]
+    node_data: ActionTicketNodeData
+
+class FlowNodeWaitMessage(BaseModel):
+    node_id: str
+    node_type: Literal[NodeType.WAIT_MESSAGE]
+    node_data: Optional[Dict[str, Any]] = PydanticField(default_factory=dict)
 
 class FlowNodeEnd(BaseModel):
     node_id: str
     node_type: Literal[NodeType.END]
     node_data: Optional[Dict[str, Any]] = PydanticField(default_factory=dict)
 
+class FlowNodeActionXlsxSearch(BaseModel):
+    node_id: str
+    node_type: Literal[NodeType.ACTION_XLSX_SEARCH]
+    node_data: ActionXlsxSearchData
+
+
 # Annotated Union uses the 'node_type' field exactly like a switch statement
 FlowNodeBase = Annotated[
-    Union[FlowNodeStart, FlowNodeCondition, FlowNodeMessage, FlowNodeEnd],
+    Union[
+        FlowNodeStart, 
+        FlowNodeCondition, 
+        FlowNodeOptions, 
+        FlowNodeMessage, 
+        FlowNodeActionTicket, 
+        FlowNodeWaitMessage, 
+        FlowNodeActionXlsxSearch,
+        FlowNodeEnd
+    ],
     PydanticField(discriminator="node_type")
 ]
-
 
 # --- Edges & Wrapping Schemas ---
 
@@ -85,7 +136,7 @@ class FlowCreate(FlowBase):
 
 class FlowUpdate(BaseModel):
     name: Optional[str] = None
-    status: Optional[FlowStatus] = None
+    is_active: Optional[bool] = None
     priority: Optional[int] = None
     message_priority: Optional[int] = None
     priority_over_autoreply: Optional[bool] = None
@@ -96,6 +147,7 @@ class FlowUpdate(BaseModel):
 
 class FlowListRead(FlowBase):
     id: int
+    share_code: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

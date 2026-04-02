@@ -9,6 +9,7 @@ class enumMatchType(str, enum.Enum):
     contains = "contains"
     starts_with = "starts_with"
     ends_with = "ends_with"
+    any = "any"
 
 
 class AutoReplyPhoneLink(SQLModel, table=True):

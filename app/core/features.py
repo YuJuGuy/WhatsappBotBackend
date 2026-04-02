@@ -15,6 +15,7 @@ class Feature(str, Enum):
     settings = "settings"
     chat = "chat"
     flows = "flows"
+    tickets = "tickets"
 
 
 FEATURE_DEPENDENCIES: dict[Feature, tuple[Feature, ...]] = {

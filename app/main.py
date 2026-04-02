@@ -15,13 +15,15 @@ from app.api.blacklist import routes as blacklist_routes
 from app.api.train import routes as train_routes
 from app.api.storage import routes as storage_routes
 from app.api.flow import routes as flow_routes
+from app.api.dashboard import routes as dashboard_routes
+from app.api.tickets import routes as tickets_routes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_db_and_tables()
     yield
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -52,8 +54,9 @@ app.include_router(blacklist_routes.router, prefix="/api/blacklist", tags=["blac
 app.include_router(train_routes.router, prefix="/api/train", tags=["train"])
 app.include_router(storage_routes.router, prefix="/api/storage", tags=["storage"])
 app.include_router(flow_routes.router, prefix="/api/flow", tags=["flow"])
+app.include_router(dashboard_routes.router, prefix="/api/dashboard", tags=["dashboard"])
+app.include_router(tickets_routes.router, prefix="/api/tickets", tags=["tickets"])
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to FastAPI NextJS Auth API"}
-
+    return {"message": "Welcome to WhataBot API"}

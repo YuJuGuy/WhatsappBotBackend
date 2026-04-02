@@ -65,20 +65,79 @@ def get_messages(
     }
 
 
+from sqlalchemy.exc import IntegrityError
+
 def save_message(event: MessageWebhookEvent):
     """Save a message to the database."""
+    if not event.user_id:
+        print("[Webhook] Skipping save_message: No user_id in webhook headers")
+        return None, False
+
     session = next(get_session())
     try:
+        other_raw = event.payload.from_number
+
+        if other_raw.endswith("@lid") and getattr(event.payload, "_data", None):
+            _data = event.payload._data
+            if isinstance(_data, dict):
+                info = _data.get("Info", {})
+                target_alt = info.get("RecipientAlt", "") if event.payload.fromMe else info.get("SenderAlt", "")
+                
+                if target_alt and not target_alt.endswith("@lid"):
+                    other_raw = target_alt
+                else:
+                    chat = info.get("Chat", "")
+                    if chat and not chat.endswith("@lid"):
+                        other_raw = chat
+
+        other_number = other_raw.split(":")[0].split("@")[0]
+
+        me_number = ""
+        if event.me and event.me.id:
+            me_number = event.me.id.split("@")[0]
+
+        if event.payload.fromMe:
+            from_number = me_number
+            to_number = other_number
+        else:
+            from_number = other_number
+            to_number = me_number
+
+        if from_number == to_number:
+            print(f"[Webhook] Skipping message: from_number == to_number")
+            return None, False
+
+        print(f"[Webhook] Parsed from_number: {from_number}, to_number: {to_number}")
+
+        message_timestamp = datetime.now(timezone.utc)
+        if event.payload.timestamp > 0:
+            try:
+                message_timestamp = datetime.fromtimestamp(event.payload.timestamp, tz=timezone.utc)
+            except Exception:
+                pass
+
         message = Messages(
+            waha_message_id=event.payload.id,
             session_id=event.session,
-            from_number=event.payload.from_number,
+            from_number=from_number,
+            to_number=to_number,
             message_body=event.payload.body,
             from_me=event.payload.fromMe,
-            user_id=event.user_id
+            user_id=event.user_id,
+            timestamp=message_timestamp,
         )
         session.add(message)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            print(f"[Webhook] Duplicate message skipped: waha_message_id={event.payload.id}")
+            return None, False
         session.refresh(message)
-        return message
+        print(f"[Webhook] Saved message: id={message.id}")
+        return message, True
+    except Exception as e:
+        print(f"[Webhook] Error saving message: {e}")
+        return None, False
     finally:
         session.close()

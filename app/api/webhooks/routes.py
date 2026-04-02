@@ -10,7 +10,8 @@ from app.utils.hmac_verify import verify_webhook_hmac
 from app.schemas.call import CallWebhookEvent
 from app.api.calls.routes import call_webhook
 from app.schemas.messages import MessageWebhookEvent
-from app.api.autoreply.routes import message_webhook, save_message
+from app.api.messages.routes import save_message
+from app.api.autoreply.routes import message_webhook
 from app.api.phone.routes import session_status_webhook
 from app.schemas.phone import SessionStatusWebhookEvent
 from app.api.flow.routes import webhook_flow_executor
@@ -89,20 +90,35 @@ async def global_webhook_receive(request: Request):
         
         inserted = True
         if should_save_message and not is_sandbox:
-            print(f"[Webhook] Saving message: {event}")
+            print(f"[Webhook] Saving message")
             _, inserted = save_message(event)
         
-        # 2. Process logic only once for a newly saved message
+        # 2. Process logic only once for a newly saved message (Incoming only)
         sandbox_responses = []
-        if inserted or is_sandbox:
+        if (inserted or is_sandbox) and not event.payload.fromMe:
             consumed_by_flow = False
+            
+            # De-mask the device specific LID identifier to the real phone number.
+            cleaned_from = raw_from
+            if raw_from.endswith("@lid") and getattr(event.payload, "_data", None):
+                if isinstance(event.payload._data, dict):
+                    info = event.payload._data.get("Info", {})
+                    sender_alt = info.get("SenderAlt", "")
+                    if sender_alt and not sender_alt.endswith("@lid"):
+                        cleaned_from = sender_alt
+                    else:
+                        chat = info.get("Chat", "")
+                        if chat and not chat.endswith("@lid"):
+                            cleaned_from = chat
+                            
+            cleaned_from = cleaned_from.split(":")[0].split("@")[0]
             
             # 2a. Attempt Visual Flows Execution Engine First!
             if should_process_flows:
                 consumed_by_flow, flow_resp = await webhook_flow_executor(
                     incoming_message_id=event.payload.id,
                     session_id=session_id,
-                    contact_id=raw_from,
+                    contact_id=cleaned_from,
                     user_id=user.id,
                     text=event.payload.body or "",
                     is_sandbox=is_sandbox

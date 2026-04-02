@@ -9,11 +9,11 @@ class NodeType(str, Enum):
     END = "end"
     MESSAGE = "message"
     CONDITION = "condition"
+    OPTIONS = "options"
+    ACTION_TICKET = "action_ticket"
+    WAIT_MESSAGE = "wait_message"
+    ACTION_XLSX_SEARCH = "action_xlsx_search"
 
-class FlowStatus(str, Enum):
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    DRAFT = "draft"
 
 class FlowRunStatus(str, Enum):
     RUNNING = "running"
@@ -35,11 +35,12 @@ class Flow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(index=True)
     name: str
-    status: FlowStatus
+    is_active: bool = Field(default=False)
     priority: int = Field(default=50)
     message_priority: int = Field(default=50)
     priority_over_autoreply: bool = Field(default=True)
-    timeout_minutes: Optional[int] = Field(default=1440) # 24 hours default
+    timeout_minutes: Optional[int] = Field(default=1440)
+    share_code: Optional[str] = Field(default=None, max_length=12, index=True)
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
 
@@ -79,6 +80,8 @@ class FlowRun(SQLModel, table=True):
     contact_id: str = Field(index=True)
     current_node_id: Optional[int] = Field(default=None, index=True)
     status: FlowRunStatus
+    
+    session_metadata: dict = Field(default_factory=dict, sa_column=Column(JSONB))
     
     expires_at: Optional[datetime] = Field(default=None, index=True)
     last_processed_message_id: Optional[str] = Field(default=None)

@@ -1,11 +1,11 @@
 from pathlib import Path
 from uuid import uuid4
-
+from datetime import date, timedelta, datetime
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
-from app.api.deps import get_current_user, get_session, require_feature
+from app.api.deps import get_current_user, get_session, require_feature, get_current_superuser
 from app.api.rate_limit import rate_limit_by_user
 from app.core.features import Feature
 from app.core.storage import USER_FILES_ROOT, ensure_storage_dirs
@@ -83,7 +83,7 @@ async def upload_stored_file(
     session.add(stored_file)
     session.commit()
     session.refresh(stored_file)
-    return stored_file
+    return {"success": True, "id": stored_file.id}
 
 
 @router.get("/", response_model=list[StoredFileRead])
@@ -142,3 +142,54 @@ def delete_stored_file(
     session.delete(stored_file)
     session.commit()
     return None
+
+
+@router.post("/{file_id}/extend", response_model=StoredFileRead)
+def extend_stored_file(
+    file_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_superuser),
+):
+    stored_file = _get_owned_file(file_id, session, current_user)
+    # Check if already extended (more than 90 days left)
+    if stored_file.expires_at > (datetime.utcnow() + timedelta(days=90)):
+        raise HTTPException(status_code=400, detail="File is already extended")
+    
+    # Set to 100 days from now
+    stored_file.expires_at = (datetime.utcnow() + timedelta(days=100))
+    session.add(stored_file)
+    session.commit()
+    session.refresh(stored_file)
+    return stored_file
+
+
+@router.get("/{file_id}/headers")
+def get_xlsx_headers(
+    file_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    stored_file = _get_owned_file(file_id, session, current_user)
+    file_path = _resolve_file_path(stored_file)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File content not found")
+    
+    try:
+        import openpyxl
+        # Read only the first row for headers
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        ws = wb.active
+        headers = []
+        # Get the first row
+        for row in ws.iter_rows(max_row=1):
+            for cell in row:
+                if cell.value:
+                    headers.append(str(cell.value).strip())
+            break
+        return headers
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read headers: {e}")
+
+
+
+
