@@ -9,6 +9,7 @@ from app.api.deps import get_session, get_current_user, require_feature, user_ha
 from app.models.user import User
 from app.models.phone import Phone
 from app.models.flow import Flow, FlowNode, FlowEdge, FlowRun, FlowRunStatus, FlowPhoneLink
+from app.models.outbox import OutboxMessage
 from app.api.rate_limit import rate_limit_by_user
 from app.api.outbox.routes import insert_outbox
 from app.models.storage import StoredFile
@@ -472,12 +473,21 @@ async def webhook_flow_executor(
     ).first()
 
     if active_run:
-        # 1a. Duplicate message check (Waha retry protection)
+        # 1a. Block user input if previous bot message hasn't been sent yet
+        if active_run.waiting_for_outbox_id:
+            outbox = session.get(OutboxMessage, active_run.waiting_for_outbox_id)
+            if outbox and outbox.status != "sent":
+                print(f"[Flow] ⛔ Ignoring message '{text}' from {contact_id} because Outbox {active_run.waiting_for_outbox_id} not sent yet (status={outbox.status})")
+                session.close()
+                return True, sandbox_responses
+            active_run.waiting_for_outbox_id = None
+
+        # 1b. Duplicate message check (Waha retry protection)
         if active_run.last_processed_message_id == incoming_message_id:
             session.close()
             return True, sandbox_responses  # The Webhook fired twice, ignore it completely
 
-        # 1b. Expiration Timer Check
+        # 1c. Expiration Timer Check
         if active_run.expires_at and datetime.now() > active_run.expires_at:
             active_run.status = FlowRunStatus.EXPIRED
             session.add(active_run)
@@ -849,6 +859,8 @@ async def webhook_flow_executor(
                     priority=flow_message_priority,
                     source_feature="flow"
                 )
+                active_run.waiting_for_outbox_id = outbox_id
+                session.add(active_run)
                 print(f"[Flow] 📤 Inserted Outbox ID: {outbox_id}")
 
             # Find next node! (Usually connected with 'default' edge, but fallback to any)

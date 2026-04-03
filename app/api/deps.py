@@ -1,7 +1,6 @@
 from datetime import date
 from typing import Annotated
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from sqlmodel import Session
 from app.core.config import settings
@@ -9,8 +8,6 @@ from app.core.features import Feature, expand_features
 from app.db.engine import get_session
 from app.models.user import User
 from app.schemas.token import TokenData
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
 
 def _error_detail(code: str, message: str, **extra):
@@ -47,24 +44,39 @@ def user_has_feature(user: User, feature: Feature | str) -> bool:
     normalized = {item.value for item in expand_features(allowed_features)}
     return feature_name in normalized
 
-def get_current_user(token: Annotated[str, Depends(oauth2_scheme)], session: Session = Depends(get_session)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+from fastapi import Request
+
+def get_current_user(request: Request, session: Session = Depends(get_session)):
+    token = request.cookies.get("access_token")
+
+    # fallback to Authorization header for API clients
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        print("DECODED PAYLOAD:", payload)
         user_id: str = payload.get("sub")
         if user_id is None:
-            raise credentials_exception
-        token_data = TokenData(id=user_id)
-    except JWTError:
-        raise credentials_exception
-    
-    user = session.get(User, int(token_data.id))
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    except JWTError as e:
+        print("JWT DECODE ERROR:", e)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    user = session.get(User, int(user_id))
+
     if user is None:
-        raise credentials_exception
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
     return ensure_user_can_access(user)
 
 

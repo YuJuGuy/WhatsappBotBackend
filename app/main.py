@@ -20,16 +20,24 @@ from app.api.tickets import routes as tickets_routes
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure the database schema exists before the API starts serving requests.
     create_db_and_tables()
     yield
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 from fastapi.middleware.cors import CORSMiddleware
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
-origins = [
-    "*",
-]
+env = os.getenv("ENV", "dev")
+
+if env == "prod":
+    # Set your production frontend domain via env var later
+    origins = [os.getenv("FRONTEND_ORIGIN", "https://your-domain.com")]
+else:
+    origins = ["http://localhost:3000","http://localhost:3001", "http://100.112.226.64:3001" ]
 
 app.add_middleware(
     CORSMiddleware,

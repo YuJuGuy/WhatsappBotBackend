@@ -12,6 +12,7 @@ from app.models.blacklist import Blacklist
 from app.models.train import TrainSession, TrainMessage
 from app.models.storage import StoredFile
 from app.models.tickets import Ticket, TicketCategory, TicketInboxShare
+from app.models.refresh_token import RefreshToken
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:22101975@localhost:5432/postgres")
 

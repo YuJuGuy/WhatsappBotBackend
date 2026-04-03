@@ -85,7 +85,8 @@ class FlowRun(SQLModel, table=True):
     
     expires_at: Optional[datetime] = Field(default=None, index=True)
     last_processed_message_id: Optional[str] = Field(default=None)
-    
+    waiting_for_outbox_id: Optional[int] = Field(default=None, index=True)
+
     created_at: datetime = Field(default_factory=datetime.now, index=True)
     updated_at: datetime = Field(default_factory=datetime.now, index=True)
     
